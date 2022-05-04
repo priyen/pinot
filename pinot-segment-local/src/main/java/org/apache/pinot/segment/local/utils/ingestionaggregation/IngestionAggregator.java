@@ -20,6 +20,7 @@ package org.apache.pinot.segment.local.utils.ingestionaggregation;
 
 import com.google.common.base.Preconditions;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
 import org.apache.pinot.common.request.context.ExpressionContext;
@@ -57,17 +58,29 @@ public class IngestionAggregator {
           "aggregation function must be a function: %s", config);
       FunctionContext functionContext = expressionContext.getFunction();
       TableConfigUtils.validateIngestionAggregation(functionContext.getFunctionName());
-      Preconditions.checkState(functionContext.getArguments().size() == 1,
-          "aggregation function can only have one argument: %s", config);
-      ExpressionContext argument = functionContext.getArguments().get(0);
-      Preconditions.checkState(argument.getType() == ExpressionContext.Type.IDENTIFIER,
+
+      List<ExpressionContext> arguments = functionContext.getArguments();
+      ExpressionContext firstArg = arguments.get(0);
+
+      Preconditions.checkState(firstArg.getType() == ExpressionContext.Type.IDENTIFIER,
           "aggregator function argument must be a identifier: %s", config);
+
+      switch (functionContext.getFunctionName()) {
+        case "distinctcounthll":
+          Preconditions.checkState(functionContext.getArguments().size() >= 1 && functionContext.getArguments().size() <= 2,
+              "distinctcounthll function can have max two arguments: %s", config);
+          break;
+        default:
+          Preconditions.checkState(functionContext.getArguments().size() == 1,
+              "aggregation function can only have one argument: %s", config);
+      }
+
 
       AggregationFunctionType functionType =
           AggregationFunctionType.getAggregationFunctionType(functionContext.getFunctionName());
 
-      destColumnToSrcColumn.put(config.getColumnName(), argument.getLiteral());
-      destColumnToValueAggregators.put(config.getColumnName(), ValueAggregatorFactory.getValueAggregator(functionType));
+      destColumnToSrcColumn.put(config.getColumnName(), firstArg.getLiteral());
+      destColumnToValueAggregators.put(config.getColumnName(), ValueAggregatorFactory.getValueAggregator(functionType, arguments));
     }
 
     return new IngestionAggregator(destColumnToSrcColumn, destColumnToValueAggregators);

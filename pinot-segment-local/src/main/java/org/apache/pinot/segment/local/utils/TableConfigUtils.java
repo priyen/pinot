@@ -18,10 +18,12 @@
  */
 package org.apache.pinot.segment.local.utils;
 
+import com.clearspring.analytics.stream.cardinality.HyperLogLog;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableSet;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -39,6 +41,8 @@ import org.apache.pinot.common.request.context.FunctionContext;
 import org.apache.pinot.common.request.context.RequestContextUtils;
 import org.apache.pinot.common.tier.TierFactory;
 import org.apache.pinot.common.utils.config.TagNameUtils;
+import org.apache.pinot.segment.local.aggregator.ValueAggregator;
+import org.apache.pinot.segment.local.aggregator.ValueAggregatorFactory;
 import org.apache.pinot.segment.local.function.FunctionEvaluator;
 import org.apache.pinot.segment.local.function.FunctionEvaluatorFactory;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
@@ -321,8 +325,10 @@ public final class TableConfigUtils {
         Set<String> aggregationColumns = new HashSet<>();
         for (AggregationConfig aggregationConfig : aggregationConfigs) {
           String columnName = aggregationConfig.getColumnName();
+          FieldSpec fieldSpec = null;
           if (schema != null) {
-            Preconditions.checkState(schema.getFieldSpecFor(columnName) != null, "The destination column '" + columnName
+            fieldSpec = schema.getFieldSpecFor(columnName);
+            Preconditions.checkState(fieldSpec != null, "The destination column '" + columnName
                 + "' of the aggregation function must be present in the schema");
           }
           String aggregationFunction = aggregationConfig.getAggregationFunction();
@@ -336,7 +342,7 @@ public final class TableConfigUtils {
           }
           ExpressionContext expressionContext;
           try {
-            expressionContext = RequestContextUtils.getExpressionFromSQL(aggregationConfig.getAggregationFunction());
+            expressionContext = RequestContextUtils.getExpression(aggregationConfig.getAggregationFunction());
           } catch (Exception e) {
             throw new IllegalStateException(
                 "Invalid aggregation function '" + aggregationFunction + "' for column '" + columnName + "'", e);
@@ -346,15 +352,62 @@ public final class TableConfigUtils {
 
           FunctionContext functionContext = expressionContext.getFunction();
           validateIngestionAggregation(functionContext.getFunctionName());
-          Preconditions.checkState(functionContext.getArguments().size() == 1,
-              "aggregation function can only have one argument: %s", aggregationConfig);
+
+          List<ExpressionContext> arguments = functionContext.getArguments();
+          Preconditions.checkState(expressionContext.getType() == ExpressionContext.Type.FUNCTION,
+              "aggregation function must be a function for: %s", aggregationConfig);
+
+          switch (functionContext.getFunctionName()) {
+            case "distinctcounthll":
+              Preconditions.checkState(functionContext.getArguments().size() >= 1 && functionContext.getArguments().size() <= 2,
+                  "distinctcounthll function can have max two arguments: %s", aggregationConfig);
+
+              int log2m = 8;
+              if (functionContext.getArguments().size() == 2) {
+                Preconditions.checkState(StringUtils.isNumeric(functionContext.getArguments().get(1).getLiteral()) == true,
+                    "distinctcounthll function second argument must be a number");
+
+                log2m = Integer.parseInt(functionContext.getArguments().get(1).getLiteral());
+              }
+
+              int expectedBytesForHLL;
+              try {
+                expectedBytesForHLL = (new HyperLogLog(log2m)).getBytes().length;
+              } catch (IOException e) {
+                throw new RuntimeException(e);
+              }
+
+              String destinationColumn  = aggregationConfig.getColumnName();
+              FieldSpec destinationFieldSpec = schema.getFieldSpecFor(destinationColumn);
+
+              if (destinationFieldSpec == null) {
+                throw new RuntimeException("couldn't find field config for " + destinationColumn + ". Unable to validate aggregation config for distinctcounthll");
+              } else {
+                int maxLength = destinationFieldSpec.getMaxLength();
+                Preconditions.checkState(maxLength == expectedBytesForHLL, "destination field for distinctcounthll must have maxLength property set to " + expectedBytesForHLL + ", the size of a HLL object with log2m of " + log2m);
+                break;
+              }
+            default:
+            Preconditions.checkState(functionContext.getArguments().size() == 1,
+                "aggregation function can only have one argument: %s", aggregationConfig);
+          }
 
           ExpressionContext argument = functionContext.getArguments().get(0);
           Preconditions.checkState(argument.getType() == ExpressionContext.Type.IDENTIFIER,
-              "aggregator function argument must be a identifier: %s", aggregationConfig);
+              "aggregator function argument must be an identifier: %s", aggregationConfig);
 
           Preconditions.checkState(schema.getFieldSpecFor(argument.getIdentifier()) == null,
               "source column %s cannot be in the schema: %s", argument.getIdentifier(), aggregationConfig);
+
+          AggregationFunctionType functionType =
+              AggregationFunctionType.getAggregationFunctionType(functionContext.getFunctionName());
+          ValueAggregator valueAggregator = ValueAggregatorFactory.getValueAggregator(functionType, arguments);
+
+          if (schema != null && fieldSpec != null) {
+            Preconditions.checkState(valueAggregator.getAggregatedValueType() == fieldSpec.getDataType(),
+                "aggregator function datatype (%s) must be the same as the schema datatype (%s) for %s",
+                valueAggregator.getAggregatedValueType(), fieldSpec.getDataType(), fieldSpec.getName());
+          }
 
           aggregationSourceColumns.add(argument.getIdentifier());
         }
@@ -430,9 +483,9 @@ public final class TableConfigUtils {
      */
     List<AggregationFunctionType> allowed =
         Arrays.asList(AggregationFunctionType.SUM, AggregationFunctionType.MIN, AggregationFunctionType.MAX,
-            AggregationFunctionType.COUNT);
+            AggregationFunctionType.COUNT, AggregationFunctionType.DISTINCTCOUNTHLL);
     for (AggregationFunctionType functionType : allowed) {
-      if (functionType.getName().equals(name)) {
+      if (functionType.getName().toLowerCase().equals(name)) {
         return;
       }
     }

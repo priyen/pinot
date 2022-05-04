@@ -64,10 +64,19 @@ public class IngestionAggregatorTest {
     }
 
     segmentConfig = new RealtimeSegmentConfig.Builder().setIngestionAggregationConfigs(
-        Arrays.asList(new AggregationConfig("d1", "DISTINCTCOUNTHLL(s1)"))).build();
+        Arrays.asList(new AggregationConfig("d1", "DISTINCTCOUNTSMARTHLL(s1)"))).build();
     try {
       IngestionAggregator.fromRealtimeSegmentConfig(segmentConfig);
       Assert.fail("Should fail due to the aggregationFunction not being supported");
+    } catch (IllegalStateException e) {
+      // expected
+    }
+
+    segmentConfig = new RealtimeSegmentConfig.Builder().setIngestionAggregationConfigs(
+        Arrays.asList(new AggregationConfig("d1", "DISTINCTCOUNTHLL(s1,12,5)"))).build();
+    try {
+      IngestionAggregator.fromRealtimeSegmentConfig(segmentConfig);
+      Assert.fail("Should fail due to the too many arguments for DISTINCTCOUNTHLL");
     } catch (IllegalStateException e) {
       // expected
     }
@@ -95,7 +104,10 @@ public class IngestionAggregatorTest {
   public void testValidConditions() {
     RealtimeSegmentConfig segmentConfig = new RealtimeSegmentConfig.Builder().setIngestionAggregationConfigs(
         Arrays.asList(new AggregationConfig("d1", "SUM(s1)"), new AggregationConfig("d2", "MIN(s2)"),
-            new AggregationConfig("d3", "MAX(s2)"))).build();
+            new AggregationConfig("d3", "MAX(s2)"),
+            new AggregationConfig("d4", "DISTINCTCOUNTHLL(s2)"),
+            new AggregationConfig("d5", "DISTINCTCOUNTHLL(s2, 12)")
+        )).build();
     IngestionAggregator ingestionAggregator = IngestionAggregator.fromRealtimeSegmentConfig(segmentConfig);
     Assert.assertNotNull(ingestionAggregator.getAggregator("d1"));
     Assert.assertEquals(ingestionAggregator.getAggregator("d1").getAggregationType(), AggregationFunctionType.SUM);
@@ -104,5 +116,9 @@ public class IngestionAggregatorTest {
     Assert.assertEquals(ingestionAggregator.getMetricName("d2"), "s2");
     Assert.assertEquals(ingestionAggregator.getAggregator("d3").getAggregationType(), AggregationFunctionType.MAX);
     Assert.assertEquals(ingestionAggregator.getMetricName("d3"), "s2");
+    Assert.assertEquals(ingestionAggregator.getAggregator("d4").getAggregationType(), AggregationFunctionType.DISTINCTCOUNTHLL);
+    Assert.assertEquals(ingestionAggregator.getMetricName("d4"), "s2");
+    Assert.assertEquals(ingestionAggregator.getAggregator("d5").getAggregationType(), AggregationFunctionType.DISTINCTCOUNTHLL);
+    Assert.assertEquals(ingestionAggregator.getMetricName("d5"), "s2");
   }
 }

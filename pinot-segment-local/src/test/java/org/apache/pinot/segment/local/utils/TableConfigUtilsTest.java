@@ -511,7 +511,11 @@ public class TableConfigUtilsTest {
       // expected
     }
 
-    aggregationConfigs = Arrays.asList(new AggregationConfig("d1", "DISTINCTCOUNTHLL(s1)"));
+    schema = new Schema.SchemaBuilder().setSchemaName(TABLE_NAME).addMetric("d1", FieldSpec.DataType.BYTES).build();
+    schema.getFieldSpecFor("d1").setMaxLength(180);
+
+    // distinctcounthllmv is not supported, we expect this to not validate
+    aggregationConfigs = Arrays.asList(new AggregationConfig("d1", "DISTINCTCOUNTHLLMV(s1)"));
     ingestionConfig =
         new IngestionConfig(null, null, null,
             aggregationConfigs, null, null);
@@ -524,6 +528,46 @@ public class TableConfigUtilsTest {
       Assert.fail("Should fail due to not supported aggregation function");
     } catch (IllegalStateException e) {
       // expected
+    }
+
+    // test the distinctcounthll validation for various log2m sizes
+    HashMap<Integer, Integer> log2mToExpectedSize = new HashMap<>();
+    log2mToExpectedSize.put(8, 180);
+    log2mToExpectedSize.put(12, 2740);
+
+    for (Map.Entry<Integer, Integer> entry : log2mToExpectedSize.entrySet()) {
+      // set the max length to the HLL expected bytes size
+      schema.getFieldSpecFor("d1").setMaxLength(entry.getValue());
+
+      aggregationConfigs = Arrays.asList(new AggregationConfig("d1", "DISTINCTCOUNTHLL(s1, " + entry.getKey() + ")"));
+      ingestionConfig =
+          new IngestionConfig(null, null, null,
+              aggregationConfigs, null, null);
+      tableConfig =
+          new TableConfigBuilder(TableType.REALTIME).setTableName("myTable_REALTIME").setTimeColumnName("timeColumn")
+              .setIngestionConfig(ingestionConfig).build();
+
+      try {
+        TableConfigUtils.validateIngestionConfig(tableConfig, schema);
+      } catch (IllegalStateException e) {
+        Assert.fail("The HLL object size based on the log2m doesn't match the destination BYTES field's maxLength property");
+      }
+    }
+
+    // distinctcounthll, expect not specified log2m argument to default to 8
+    schema.getFieldSpecFor("d1").setMaxLength(180);
+    aggregationConfigs = Arrays.asList(new AggregationConfig("d1", "DISTINCTCOUNTHLL(s1)"));
+    ingestionConfig =
+        new IngestionConfig(null, null, null,
+            aggregationConfigs, null, null);
+    tableConfig =
+        new TableConfigBuilder(TableType.REALTIME).setTableName("myTable_REALTIME").setTimeColumnName("timeColumn")
+            .setIngestionConfig(ingestionConfig).build();
+
+    try {
+      TableConfigUtils.validateIngestionConfig(tableConfig, schema);
+    } catch (IllegalStateException e) {
+      Assert.fail("Log2m defaulted to 8 but BYTES schema maxLength is not the expected size of 180");
     }
 
     aggregationConfigs = Arrays.asList(new AggregationConfig("d1", "s1 + s2"));

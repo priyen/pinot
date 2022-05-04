@@ -628,7 +628,11 @@ public class MutableSegmentImpl implements MutableSegment {
               forwardIndex.setString(docId, (String) value);
               break;
             case BYTES:
-              forwardIndex.setBytes(docId, (byte[]) value);
+              if (valueAggregator != null) {
+                forwardIndex.setBytes(docId, valueAggregator.serializeAggregatedValue(value));
+              } else {
+                forwardIndex.setBytes(docId, (byte[]) value);
+              }
               break;
             default:
               throw new UnsupportedOperationException(
@@ -744,6 +748,11 @@ public class MutableSegmentImpl implements MutableSegment {
             break;
           case LONG:
             forwardIndex.setLong(docId, (Long) valueAggregator.applyRawValue(forwardIndex.getLong(docId), value));
+            break;
+          case BYTES:
+            Object currentValue = valueAggregator.deserializeAggregatedValue(forwardIndex.getBytes(docId));
+            Object newVal = valueAggregator.applyRawValue(currentValue, value);
+            forwardIndex.setBytes(docId, valueAggregator.serializeAggregatedValue(newVal));
             break;
           default:
             throw new UnsupportedOperationException(
