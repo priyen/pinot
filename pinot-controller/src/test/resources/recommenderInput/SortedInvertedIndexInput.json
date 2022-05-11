@@ -71,6 +71,15 @@
         "dataType": "DOUBLE",
         "cardinality":4,
         "numValuesPerEntry":1.00000001
+      },
+      {
+        "name": "ja",
+        "dataType": "BOOLEAN"
+      },
+      {
+        "name": "jb",
+        "dataType": "BOOLEAN",
+        "numValuesPerEntry": 3
       }
     ],
     "metricFieldSpecs": [
@@ -83,7 +92,7 @@
       },
       {
         "name": "l",
-        "dataType": "STRING",
+        "dataType": "DOUBLE",
         "cardinality":10000,
         "numValuesPerEntry":1,
         "averageLength" : 10

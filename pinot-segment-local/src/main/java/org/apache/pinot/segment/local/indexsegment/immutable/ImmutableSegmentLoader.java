@@ -20,6 +20,7 @@ package org.apache.pinot.segment.local.indexsegment.immutable;
 
 import com.google.common.base.Preconditions;
 import java.io.File;
+import java.net.URI;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -36,7 +37,9 @@ import org.apache.pinot.segment.local.startree.v2.store.StarTreeIndexContainer;
 import org.apache.pinot.segment.spi.ColumnMetadata;
 import org.apache.pinot.segment.spi.ImmutableSegment;
 import org.apache.pinot.segment.spi.converter.SegmentFormatConverter;
+import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentVersion;
+import org.apache.pinot.segment.spi.index.IndexingOverrides;
 import org.apache.pinot.segment.spi.index.column.ColumnIndexContainer;
 import org.apache.pinot.segment.spi.index.metadata.SegmentMetadataImpl;
 import org.apache.pinot.segment.spi.loader.SegmentDirectoryLoader;
@@ -94,39 +97,72 @@ public class ImmutableSegmentLoader {
    * modify the segment like to convert segment format, add or remove indices.
    */
   public static ImmutableSegment load(File indexDir, IndexLoadingConfig indexLoadingConfig, @Nullable Schema schema,
-      boolean shouldModifySegment)
+      boolean needPreprocess)
       throws Exception {
     Preconditions.checkArgument(indexDir.isDirectory(), "Index directory: %s does not exist or is not a directory",
         indexDir);
 
-    SegmentMetadataImpl localSegmentMetadata = new SegmentMetadataImpl(indexDir);
-    if (localSegmentMetadata.getTotalDocs() == 0) {
-      return new EmptyIndexSegment(localSegmentMetadata);
+    SegmentMetadataImpl segmentMetadata = new SegmentMetadataImpl(indexDir);
+    if (segmentMetadata.getTotalDocs() == 0) {
+      return new EmptyIndexSegment(segmentMetadata);
+    }
+    if (schema != null) {
+      schema = SegmentGeneratorConfig.updateSchemaWithTimestampIndexes(schema,
+          SegmentGeneratorConfig.extractTimestampIndexConfigsFromTableConfig(indexLoadingConfig.getTableConfig()));
     }
 
-    // This step will modify the segment data on disk.
-    if (shouldModifySegment) {
-      // Convert segment version as needed.
-      convertSegmentFormat(indexDir, indexLoadingConfig, localSegmentMetadata);
-      // Preprocess the segment on local using local SegmentDirectory.
-      preprocessSegment(indexDir, localSegmentMetadata.getName(), indexLoadingConfig, schema);
+    if (needPreprocess) {
+      preprocess(indexDir, indexLoadingConfig, schema);
     }
-
-    // Load the segment again using the configured segmentDirectoryLoader
-    PinotConfiguration segmentDirectoryConfigs = indexLoadingConfig.getSegmentDirectoryConfigs();
+    String segmentName = segmentMetadata.getName();
     SegmentDirectoryLoaderContext segmentLoaderContext =
-        new SegmentDirectoryLoaderContext(indexLoadingConfig.getTableConfig(), indexLoadingConfig.getInstanceId(),
-            localSegmentMetadata.getName(), segmentDirectoryConfigs);
-
-    SegmentDirectoryLoader segmentDirectoryLoader =
+        new SegmentDirectoryLoaderContext.Builder().setTableConfig(indexLoadingConfig.getTableConfig())
+            .setSchema(schema).setInstanceId(indexLoadingConfig.getInstanceId()).setSegmentName(segmentName)
+            .setSegmentCrc(segmentMetadata.getCrc())
+            .setSegmentDirectoryConfigs(indexLoadingConfig.getSegmentDirectoryConfigs()).build();
+    SegmentDirectoryLoader segmentLoader =
         SegmentDirectoryLoaderRegistry.getSegmentDirectoryLoader(indexLoadingConfig.getSegmentDirectoryLoader());
-    SegmentDirectory actualSegmentDirectory = segmentDirectoryLoader.load(indexDir.toURI(), segmentLoaderContext);
-    SegmentDirectory.Reader segmentReader = actualSegmentDirectory.createReader();
-    SegmentMetadataImpl segmentMetadata = actualSegmentDirectory.getSegmentMetadata();
+    SegmentDirectory segmentDirectory = segmentLoader.load(indexDir.toURI(), segmentLoaderContext);
+    try {
+      return load(segmentDirectory, indexLoadingConfig, schema);
+    } catch (Exception e) {
+      LOGGER.error("Failed to load segment: {} with SegmentDirectory", segmentName, e);
+      segmentDirectory.close();
+      throw e;
+    }
+  }
+
+  /**
+   * Preprocess the local segment directory according to the current table config and schema.
+   */
+  public static void preprocess(File indexDir, IndexLoadingConfig indexLoadingConfig, @Nullable Schema schema)
+      throws Exception {
+    Preconditions.checkArgument(indexDir.isDirectory(), "Index directory: %s does not exist or is not a directory",
+        indexDir);
+
+    SegmentMetadataImpl segmentMetadata = new SegmentMetadataImpl(indexDir);
+    if (segmentMetadata.getTotalDocs() > 0) {
+      convertSegmentFormat(indexDir, indexLoadingConfig, segmentMetadata);
+      preprocessSegment(indexDir, segmentMetadata.getName(), segmentMetadata.getCrc(), indexLoadingConfig, schema);
+    }
+  }
+
+  /**
+   * Load the segment represented by the SegmentDirectory object to serve queries.
+   */
+  public static ImmutableSegment load(SegmentDirectory segmentDirectory, IndexLoadingConfig indexLoadingConfig,
+      @Nullable Schema schema)
+      throws Exception {
+    SegmentMetadataImpl segmentMetadata = segmentDirectory.getSegmentMetadata();
+    if (segmentMetadata.getTotalDocs() == 0) {
+      return new EmptyIndexSegment(segmentMetadata);
+    }
 
     // Remove columns not in schema from the metadata
     Map<String, ColumnMetadata> columnMetadataMap = segmentMetadata.getColumnMetadataMap();
     if (schema != null) {
+      schema = SegmentGeneratorConfig.updateSchemaWithTimestampIndexes(schema,
+          SegmentGeneratorConfig.extractTimestampIndexConfigsFromTableConfig(indexLoadingConfig.getTableConfig()));
       Set<String> columnsInMetadata = new HashSet<>(columnMetadataMap.keySet());
       columnsInMetadata.removeIf(schema::hasColumn);
       if (!columnsInMetadata.isEmpty()) {
@@ -137,15 +173,24 @@ public class ImmutableSegmentLoader {
       }
     }
 
+    URI indexDirURI = segmentDirectory.getIndexDir();
+    String scheme = indexDirURI.getScheme();
+    File localIndexDir = null;
+    if (scheme != null && scheme.equalsIgnoreCase("file")) {
+      localIndexDir = new File(indexDirURI);
+    }
+
+    SegmentDirectory.Reader segmentReader = segmentDirectory.createReader();
     Map<String, ColumnIndexContainer> indexContainerMap = new HashMap<>();
     for (Map.Entry<String, ColumnMetadata> entry : columnMetadataMap.entrySet()) {
       // FIXME: text-index only works with local SegmentDirectory
       indexContainerMap.put(entry.getKey(),
-          new PhysicalColumnIndexContainer(segmentReader, entry.getValue(), indexLoadingConfig, indexDir));
+          new PhysicalColumnIndexContainer(segmentReader, entry.getValue(), indexLoadingConfig, localIndexDir,
+              IndexingOverrides.getIndexReaderProvider()));
     }
 
     // Instantiate virtual columns
-    String segmentName = indexDir.getName();
+    String segmentName = segmentMetadata.getName();
     Schema segmentSchema = segmentMetadata.getSchema();
     VirtualColumnProviderFactory.addBuiltInVirtualColumnsToSegmentSchema(segmentSchema, segmentName);
     for (FieldSpec fieldSpec : segmentSchema.getAllFieldSpecs()) {
@@ -161,16 +206,36 @@ public class ImmutableSegmentLoader {
     // FIXME: star tree only works with local SegmentDirectory
     // Load star-tree index if it exists
     StarTreeIndexContainer starTreeIndexContainer = null;
-    if (segmentMetadata.getStarTreeV2MetadataList() != null) {
+    if (segmentMetadata.getStarTreeV2MetadataList() != null && localIndexDir != null) {
       starTreeIndexContainer =
-          new StarTreeIndexContainer(SegmentDirectoryPaths.findSegmentDirectory(indexDir), segmentMetadata,
+          new StarTreeIndexContainer(SegmentDirectoryPaths.findSegmentDirectory(localIndexDir), segmentMetadata,
               indexContainerMap, indexLoadingConfig.getReadMode());
     }
 
     ImmutableSegmentImpl segment =
-        new ImmutableSegmentImpl(actualSegmentDirectory, segmentMetadata, indexContainerMap, starTreeIndexContainer);
-    LOGGER.info("Successfully loaded segment {} with config: {}", segmentName, segmentDirectoryConfigs);
+        new ImmutableSegmentImpl(segmentDirectory, segmentMetadata, indexContainerMap, starTreeIndexContainer);
+    LOGGER.info("Successfully loaded segment: {} with SegmentDirectory", segmentName);
     return segment;
+  }
+
+  /**
+   * Check segment directory against the table config and schema to see if any preprocessing is needed,
+   * like changing segment format, adding new indices or updating default columns.
+   */
+  public static boolean needPreprocess(SegmentDirectory segmentDirectory, IndexLoadingConfig indexLoadingConfig,
+      @Nullable Schema schema)
+      throws Exception {
+    if (needConvertSegmentFormat(indexLoadingConfig, segmentDirectory.getSegmentMetadata())) {
+      return true;
+    }
+    SegmentPreProcessor preProcessor = new SegmentPreProcessor(segmentDirectory, indexLoadingConfig, schema);
+    return preProcessor.needProcess();
+  }
+
+  private static boolean needConvertSegmentFormat(IndexLoadingConfig indexLoadingConfig,
+      SegmentMetadataImpl segmentMetadata) {
+    SegmentVersion segmentVersionToLoad = indexLoadingConfig.getSegmentVersion();
+    return segmentVersionToLoad != null && segmentVersionToLoad != segmentMetadata.getVersion();
   }
 
   private static void convertSegmentFormat(File indexDir, IndexLoadingConfig indexLoadingConfig,
@@ -196,13 +261,14 @@ public class ImmutableSegmentLoader {
         segmentVersionToLoad);
   }
 
-  private static void preprocessSegment(File indexDir, String segmentName, IndexLoadingConfig indexLoadingConfig,
-      @Nullable Schema schema)
+  private static void preprocessSegment(File indexDir, String segmentName, String segmentCrc,
+      IndexLoadingConfig indexLoadingConfig, @Nullable Schema schema)
       throws Exception {
     PinotConfiguration segmentDirectoryConfigs = indexLoadingConfig.getSegmentDirectoryConfigs();
     SegmentDirectoryLoaderContext segmentLoaderContext =
-        new SegmentDirectoryLoaderContext(indexLoadingConfig.getTableConfig(), indexLoadingConfig.getInstanceId(),
-            segmentName, segmentDirectoryConfigs);
+        new SegmentDirectoryLoaderContext.Builder().setTableConfig(indexLoadingConfig.getTableConfig())
+            .setSchema(schema).setInstanceId(indexLoadingConfig.getInstanceId()).setSegmentName(segmentName)
+            .setSegmentCrc(segmentCrc).setSegmentDirectoryConfigs(segmentDirectoryConfigs).build();
     SegmentDirectory segmentDirectory =
         SegmentDirectoryLoaderRegistry.getDefaultSegmentDirectoryLoader().load(indexDir.toURI(), segmentLoaderContext);
     try (SegmentPreProcessor preProcessor = new SegmentPreProcessor(segmentDirectory, indexLoadingConfig, schema)) {

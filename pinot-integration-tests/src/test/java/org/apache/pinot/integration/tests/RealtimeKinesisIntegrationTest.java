@@ -19,6 +19,7 @@
 package org.apache.pinot.integration.tests;
 
 import cloud.localstack.Localstack;
+import cloud.localstack.ServiceName;
 import cloud.localstack.docker.annotation.LocalstackDockerAnnotationProcessor;
 import cloud.localstack.docker.annotation.LocalstackDockerConfiguration;
 import cloud.localstack.docker.annotation.LocalstackDockerProperties;
@@ -47,9 +48,7 @@ import javax.activation.UnsupportedDataTypeException;
 import javax.annotation.Nullable;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pinot.client.Request;
 import org.apache.pinot.client.ResultSet;
-import org.apache.pinot.common.utils.StringUtil;
 import org.apache.pinot.plugin.stream.kinesis.KinesisConfig;
 import org.apache.pinot.plugin.stream.kinesis.KinesisConsumerFactory;
 import org.apache.pinot.spi.config.table.TableConfig;
@@ -58,6 +57,7 @@ import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.stream.StreamConfig;
 import org.apache.pinot.spi.stream.StreamConfigProperties;
 import org.apache.pinot.spi.utils.JsonUtils;
+import org.apache.pinot.spi.utils.StringUtil;
 import org.apache.pinot.spi.utils.builder.TableConfigBuilder;
 import org.apache.pinot.util.TestUtils;
 import org.slf4j.Logger;
@@ -83,8 +83,7 @@ import software.amazon.awssdk.services.kinesis.model.ShardIteratorType;
 import software.amazon.awssdk.utils.AttributeMap;
 
 
-@LocalstackDockerProperties(services = {"kinesis"})
-@Test(enabled = false)
+@LocalstackDockerProperties(services = {ServiceName.KINESIS}, imageTag = "0.12.15")
 public class RealtimeKinesisIntegrationTest extends BaseClusterIntegrationTestSet {
   private static final Logger LOGGER = LoggerFactory.getLogger(RealtimeKinesisIntegrationTest.class);
 
@@ -189,22 +188,21 @@ public class RealtimeKinesisIntegrationTest extends BaseClusterIntegrationTestSe
     String streamType = "kinesis";
     streamConfigMap.put(StreamConfigProperties.STREAM_TYPE, streamType);
 
-    streamConfigMap
-        .put(StreamConfigProperties.constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_TOPIC_NAME),
-            STREAM_NAME);
+    streamConfigMap.put(
+        StreamConfigProperties.constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_TOPIC_NAME),
+        STREAM_NAME);
 
     streamConfigMap.put(
         StreamConfigProperties.constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_FETCH_TIMEOUT_MILLIS),
         "30000");
-    streamConfigMap
-        .put(StreamConfigProperties.constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_CONSUMER_TYPES),
-            StreamConfig.ConsumerType.LOWLEVEL.toString());
-    streamConfigMap.put(StreamConfigProperties
-            .constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_CONSUMER_FACTORY_CLASS),
-        KinesisConsumerFactory.class.getName());
-    streamConfigMap
-        .put(StreamConfigProperties.constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_DECODER_CLASS),
-            "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder");
+    streamConfigMap.put(
+        StreamConfigProperties.constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_CONSUMER_TYPES),
+        StreamConfig.ConsumerType.LOWLEVEL.toString());
+    streamConfigMap.put(StreamConfigProperties.constructStreamProperty(STREAM_TYPE,
+        StreamConfigProperties.STREAM_CONSUMER_FACTORY_CLASS), KinesisConsumerFactory.class.getName());
+    streamConfigMap.put(
+        StreamConfigProperties.constructStreamProperty(STREAM_TYPE, StreamConfigProperties.STREAM_DECODER_CLASS),
+        "org.apache.pinot.plugin.inputformat.json.JSONMessageDecoder");
     streamConfigMap.put(KinesisConfig.REGION, REGION);
     streamConfigMap.put(KinesisConfig.MAX_RECORDS_TO_FETCH, String.valueOf(MAX_RECORDS_TO_FETCH));
     streamConfigMap.put(KinesisConfig.SHARD_ITERATOR_TYPE, ShardIteratorType.AFTER_SEQUENCE_NUMBER.toString());
@@ -212,8 +210,8 @@ public class RealtimeKinesisIntegrationTest extends BaseClusterIntegrationTestSe
     streamConfigMap.put(KinesisConfig.ACCESS_KEY, getLocalAWSCredentials().resolveCredentials().accessKeyId());
     streamConfigMap.put(KinesisConfig.SECRET_KEY, getLocalAWSCredentials().resolveCredentials().secretAccessKey());
     streamConfigMap.put(StreamConfigProperties.SEGMENT_FLUSH_THRESHOLD_ROWS, Integer.toString(200));
-    streamConfigMap.put(StreamConfigProperties
-        .constructStreamProperty(streamType, StreamConfigProperties.STREAM_CONSUMER_OFFSET_CRITERIA), "smallest");
+    streamConfigMap.put(StreamConfigProperties.constructStreamProperty(streamType,
+        StreamConfigProperties.STREAM_CONSUMER_OFFSET_CRITERIA), "smallest");
     return streamConfigMap;
   }
 
@@ -225,8 +223,8 @@ public class RealtimeKinesisIntegrationTest extends BaseClusterIntegrationTestSe
     _localstackDocker.startup(dockerConfig);
 
     _kinesisClient = KinesisClient.builder().httpClient(new ApacheSdkHttpService().createHttpClientBuilder()
-        .buildWithDefaults(
-            AttributeMap.builder().put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, Boolean.TRUE).build()))
+            .buildWithDefaults(
+                AttributeMap.builder().put(SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES, Boolean.TRUE).build()))
         .credentialsProvider(getLocalAWSCredentials()).region(Region.of(REGION))
         .endpointOverride(new URI(LOCALSTACK_KINESIS_ENDPOINT)).build();
 
@@ -278,8 +276,8 @@ public class RealtimeKinesisIntegrationTest extends BaseClusterIntegrationTestSe
                   .partitionKey(data.get("Origin").textValue()).build();
           PutRecordResponse putRecordResponse = _kinesisClient.putRecord(putRecordRequest);
           if (putRecordResponse.sdkHttpResponse().statusCode() == 200) {
-            if (StringUtils.isNotBlank(putRecordResponse.sequenceNumber()) && StringUtils
-                .isNotBlank(putRecordResponse.shardId())) {
+            if (StringUtils.isNotBlank(putRecordResponse.sequenceNumber()) && StringUtils.isNotBlank(
+                putRecordResponse.shardId())) {
               _totalRecordsPushedInStream++;
 
               int fieldIndex = 1;
@@ -321,9 +319,9 @@ public class RealtimeKinesisIntegrationTest extends BaseClusterIntegrationTestSe
       throws Exception {
     Assert.assertNotEquals(_totalRecordsPushedInStream, 0);
 
-    ResultSet pinotResultSet = getPinotConnection()
-        .execute(new Request("sql", "SELECT * FROM " + getTableName() + " ORDER BY Origin LIMIT 10000"))
-        .getResultSet(0);
+    ResultSet pinotResultSet =
+        getPinotConnection().execute("SELECT * FROM " + getTableName() + " ORDER BY Origin LIMIT 10000")
+            .getResultSet(0);
 
     Assert.assertNotEquals(pinotResultSet.getRowCount(), 0);
 
@@ -380,10 +378,7 @@ public class RealtimeKinesisIntegrationTest extends BaseClusterIntegrationTestSe
 
   @Test(enabled = false)
   public void testCountRecords() {
-    long count =
-        getPinotConnection().execute(new Request("sql", "SELECT COUNT(*) FROM " + getTableName())).getResultSet(0)
-            .getLong(0);
-
+    long count = getPinotConnection().execute("SELECT COUNT(*) FROM " + getTableName()).getResultSet(0).getLong(0);
     Assert.assertEquals(count, _totalRecordsPushedInStream);
   }
 
@@ -440,8 +435,8 @@ public class RealtimeKinesisIntegrationTest extends BaseClusterIntegrationTestSe
       }
     }
 
-    _h2Connection.prepareCall("CREATE TABLE " + getTableName() + "(" + StringUtil
-        .join(",", _h2FieldNameAndTypes.toArray(new String[_h2FieldNameAndTypes.size()])) + ")").execute();
+    _h2Connection.prepareCall("CREATE TABLE " + getTableName() + "(" + StringUtil.join(",",
+        _h2FieldNameAndTypes.toArray(new String[_h2FieldNameAndTypes.size()])) + ")").execute();
   }
 
   @AfterClass(enabled = false)

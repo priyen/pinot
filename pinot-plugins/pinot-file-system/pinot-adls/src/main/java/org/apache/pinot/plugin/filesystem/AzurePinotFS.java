@@ -41,7 +41,7 @@ import java.util.List;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.pinot.spi.env.PinotConfiguration;
-import org.apache.pinot.spi.filesystem.PinotFS;
+import org.apache.pinot.spi.filesystem.BasePinotFS;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,7 +50,7 @@ import org.slf4j.LoggerFactory;
  * Azure implementation for the PinotFS interface. This class will implement using azure-data-lake libraries all
  * the basic FS methods needed within Pinot.
  */
-public class AzurePinotFS extends PinotFS {
+public class AzurePinotFS extends BasePinotFS {
   private static final Logger LOGGER = LoggerFactory.getLogger(AzurePinotFS.class);
   private static final int BUFFER_SIZE = 4096;
   private ADLStoreClient _adlStoreClient;
@@ -61,7 +61,6 @@ public class AzurePinotFS extends PinotFS {
   public static final String CLIENT_SECRET = "clientSecret";
 
   public AzurePinotFS() {
-
   }
 
   @VisibleForTesting
@@ -108,8 +107,13 @@ public class AzurePinotFS extends PinotFS {
   }
 
   @Override
-  public boolean copy(URI srcUri, URI dstUri)
+  public boolean copyDir(URI srcUri, URI dstUri)
       throws IOException {
+    // TODO: support directory copy.
+    if (isDirectory(srcUri)) {
+      throw new UnsupportedOperationException("Azure FS doesn't support directory recursive copy!");
+    }
+
     if (exists(dstUri)) {
       delete(dstUri, true);
     }
@@ -127,9 +131,8 @@ public class AzurePinotFS extends PinotFS {
       inputStream.close();
       outputStream.close();
     } catch (IOException e) {
-      LOGGER
-          .error("Exception encountered during copy, input: '{}', output: '{}'.", srcUri.toString(), dstUri.toString(),
-              e);
+      LOGGER.error("Exception encountered during copy, input: '{}', output: '{}'.", srcUri, dstUri, e);
+      return false;
     }
     return true;
   }

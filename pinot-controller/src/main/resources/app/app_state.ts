@@ -16,8 +16,15 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+
+ import { AuthWorkflow } from "Models";
 class app_state {
   queryConsoleOnlyView: boolean;
+  authWorkflow: AuthWorkflow;
   authToken: string | null;
+  columnNameSeparator: string = '#$%';
+  username: string;
+  role: string;
 }
+
 export default new app_state();

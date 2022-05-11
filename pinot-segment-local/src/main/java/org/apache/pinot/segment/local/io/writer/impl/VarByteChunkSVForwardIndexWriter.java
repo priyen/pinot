@@ -21,8 +21,10 @@ package org.apache.pinot.segment.local.io.writer.impl;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.math.BigDecimal;
 import javax.annotation.concurrent.NotThreadSafe;
 import org.apache.pinot.segment.spi.compression.ChunkCompressionType;
+import org.apache.pinot.spi.utils.BigDecimalUtils;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -74,17 +76,21 @@ public class VarByteChunkSVForwardIndexWriter extends BaseChunkSVForwardIndexWri
    *     not found.
    */
   public VarByteChunkSVForwardIndexWriter(File file, ChunkCompressionType compressionType,
-      int totalDocs,
-      int numDocsPerChunk, int lengthOfLongestEntry, int writerVersion)
+      int totalDocs, int numDocsPerChunk, int lengthOfLongestEntry, int writerVersion)
       throws IOException {
     super(file, compressionType, totalDocs, numDocsPerChunk,
-        numDocsPerChunk * (CHUNK_HEADER_ENTRY_ROW_OFFSET_SIZE + lengthOfLongestEntry),
+        numDocsPerChunk * (CHUNK_HEADER_ENTRY_ROW_OFFSET_SIZE + (long) lengthOfLongestEntry),
         // chunkSize
-        lengthOfLongestEntry, writerVersion);
+        lengthOfLongestEntry, writerVersion, false);
 
     _chunkHeaderOffset = 0;
     _chunkHeaderSize = numDocsPerChunk * CHUNK_HEADER_ENTRY_ROW_OFFSET_SIZE;
     _chunkDataOffSet = _chunkHeaderSize;
+  }
+
+  @Override
+  public void putBigDecimal(BigDecimal value) {
+    putBytes(BigDecimalUtils.serialize(value));
   }
 
   @Override
@@ -113,21 +119,19 @@ public class VarByteChunkSVForwardIndexWriter extends BaseChunkSVForwardIndexWri
     // write all the strings into the data buffer as if it's a single string,
     // but with its own embedded header so offsets to strings within the body
     // can be located
-    int headerPosition = _chunkDataOffSet;
-    int headerSize = Integer.BYTES + Integer.BYTES * values.length;
-    int bodyPosition = headerPosition + headerSize;
+    _chunkBuffer.putInt(_chunkDataOffSet, values.length);
+    _chunkDataOffSet += Integer.BYTES;
+    int headerSize = Integer.BYTES * values.length;
+    int bodyPosition = _chunkDataOffSet + headerSize;
     _chunkBuffer.position(bodyPosition);
     int bodySize = 0;
-    for (int i = 0, h = headerPosition + Integer.BYTES; i < values.length; i++, h += Integer.BYTES) {
+    for (int i = 0, h = _chunkDataOffSet; i < values.length; i++, h += Integer.BYTES) {
       byte[] utf8 = values[i].getBytes(UTF_8);
       _chunkBuffer.putInt(h, utf8.length);
       _chunkBuffer.put(utf8);
       bodySize += utf8.length;
     }
     _chunkDataOffSet += headerSize + bodySize;
-    // go back to write the number of strings embedded in the big string
-    _chunkBuffer.putInt(headerPosition, values.length);
-
     writeChunkIfNecessary();
   }
 
@@ -138,21 +142,19 @@ public class VarByteChunkSVForwardIndexWriter extends BaseChunkSVForwardIndexWri
     // write all the byte[]s into the data buffer as if it's a single byte[],
     // but with its own embedded header so offsets to byte[]s within the body
     // can be located
-    int headerPosition = _chunkDataOffSet;
-    int headerSize = Integer.BYTES + Integer.BYTES * values.length;
-    int bodyPosition = headerPosition + headerSize;
+    _chunkBuffer.putInt(_chunkDataOffSet, values.length);
+    _chunkDataOffSet += Integer.BYTES;
+    int headerSize = Integer.BYTES * values.length;
+    int bodyPosition = _chunkDataOffSet + headerSize;
     _chunkBuffer.position(bodyPosition);
     int bodySize = 0;
-    for (int i = 0, h = headerPosition + Integer.BYTES; i < values.length; i++, h += Integer.BYTES) {
-      byte[] utf8 = values[i];
-      _chunkBuffer.putInt(h, utf8.length);
-      _chunkBuffer.put(utf8);
-      bodySize += utf8.length;
+    for (int i = 0, h = _chunkDataOffSet; i < values.length; i++, h += Integer.BYTES) {
+      byte[] bytes = values[i];
+      _chunkBuffer.putInt(h, bytes.length);
+      _chunkBuffer.put(bytes);
+      bodySize += bytes.length;
     }
     _chunkDataOffSet += headerSize + bodySize;
-    // go back to write the number of byte[]s embedded in the big byte[]
-    _chunkBuffer.putInt(headerPosition, values.length);
-
     writeChunkIfNecessary();
   }
 

@@ -50,6 +50,7 @@ import org.apache.pinot.segment.spi.creator.SegmentVersion;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2Constants;
 import org.apache.pinot.segment.spi.index.startree.StarTreeV2Metadata;
 import org.apache.pinot.segment.spi.store.SegmentDirectoryPaths;
+import org.apache.pinot.spi.config.table.TimestampIndexGranularity;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.env.CommonsConfigurationUtils;
 import org.apache.pinot.spi.utils.JsonUtils;
@@ -80,6 +81,9 @@ public class SegmentMetadataImpl implements SegmentMetadata {
 
   private SegmentVersion _segmentVersion;
   private List<StarTreeV2Metadata> _starTreeV2MetadataList;
+  // Caching properties around can be costly when the number of segments is high according to the
+  // finding in PR #2996. So for now, caching is used only when initializing from input streams.
+  private PropertiesConfiguration _segmentMetadataPropertiesConfiguration = null;
   private String _creatorName;
   private int _totalDocs;
   private final Map<String, String> _customMap = new HashMap<>();
@@ -96,13 +100,13 @@ public class SegmentMetadataImpl implements SegmentMetadata {
     _columnMetadataMap = new HashMap<>();
     _schema = new Schema();
 
-    PropertiesConfiguration segmentMetadataPropertiesConfiguration =
-        CommonsConfigurationUtils.fromInputStream(metadataPropertiesInputStream);
-    init(segmentMetadataPropertiesConfiguration);
+    // Caching properties when initializing from input streams.
+    _segmentMetadataPropertiesConfiguration = CommonsConfigurationUtils.fromInputStream(metadataPropertiesInputStream);
+    init(_segmentMetadataPropertiesConfiguration);
     loadCreationMeta(creationMetaInputStream);
 
-    setTimeInfo(segmentMetadataPropertiesConfiguration);
-    _totalDocs = segmentMetadataPropertiesConfiguration.getInt(Segment.SEGMENT_TOTAL_DOCS);
+    setTimeInfo(_segmentMetadataPropertiesConfiguration);
+    _totalDocs = _segmentMetadataPropertiesConfiguration.getInt(Segment.SEGMENT_TOTAL_DOCS);
   }
 
   /**
@@ -137,6 +141,11 @@ public class SegmentMetadataImpl implements SegmentMetadata {
     _segmentName = segmentName;
     _schema = schema;
     _creationTime = creationTime;
+  }
+
+  public PropertiesConfiguration getPropertiesConfiguration() {
+    return (_segmentMetadataPropertiesConfiguration != null) ? _segmentMetadataPropertiesConfiguration
+        : SegmentMetadataImpl.getPropertiesConfiguration(_indexDir);
   }
 
   public static PropertiesConfiguration getPropertiesConfiguration(File indexDir) {
@@ -261,7 +270,13 @@ public class SegmentMetadataImpl implements SegmentMetadata {
   private static void addPhysicalColumns(List src, Collection<String> dest) {
     for (Object o : src) {
       String column = o.toString();
-      if (!column.isEmpty() && column.charAt(0) != '$' && !dest.contains(column)) {
+      if (!column.isEmpty() && !dest.contains(column)) {
+        if (column.charAt(0) == '$') {
+          // Skip virtual columns starting with '$', but keep time column with granularity as physical column.
+          if (!TimestampIndexGranularity.isValidTimeColumnWithGranularityName(column)) {
+            continue;
+          }
+        }
         dest.add(column);
       }
     }

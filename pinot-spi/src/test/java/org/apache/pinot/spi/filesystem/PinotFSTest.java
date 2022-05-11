@@ -72,7 +72,7 @@ public class PinotFSTest {
   /**
    * MockRemoteFS implementation used to test behavior of the Abstract class PinotFS
    */
-  private class MockRemoteFS extends PinotFS {
+  private class MockRemoteFS extends BasePinotFS {
     public int _doMoveCalls;
     public List<Map<String, URI>> _doMoveArgs;
 
@@ -114,7 +114,7 @@ public class PinotFSTest {
     }
 
     @Override
-    public boolean copy(URI srcUri, URI dstUri)
+    public boolean copyDir(URI srcUri, URI dstUri)
         throws IOException {
       return false;
     }
@@ -145,13 +145,11 @@ public class PinotFSTest {
     @Override
     public void copyToLocalFile(URI srcUri, File dstFile)
         throws Exception {
-
     }
 
     @Override
     public void copyFromLocalFile(File srcFile, URI dstUri)
         throws Exception {
-
     }
 
     @Override

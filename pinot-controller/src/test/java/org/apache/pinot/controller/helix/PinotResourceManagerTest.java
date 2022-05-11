@@ -68,8 +68,32 @@ public class PinotResourceManagerTest {
     realtimeTableConfig.getValidationConfig().setReplicasPerPartition(NUM_REPLICAS_STRING);
     realtimeTableConfig.getValidationConfig()
         .setReplicaGroupStrategyConfig(new ReplicaGroupStrategyConfig(PARTITION_COLUMN, 1));
-    realtimeTableConfig.setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL, null, null, null));
+    realtimeTableConfig.setUpsertConfig(new UpsertConfig(UpsertConfig.Mode.FULL, null, null, null, null));
     ControllerTestUtils.getHelixResourceManager().addTable(realtimeTableConfig);
+  }
+
+  @Test
+  public void testTableCleanupAfterRealtimeClusterException()
+      throws Exception {
+    String invalidRealtimeTable = "invalidTable_REALTIME";
+    Schema dummySchema = ControllerTestUtils.createDummySchema(invalidRealtimeTable);
+    ControllerTestUtils.addSchema(dummySchema);
+
+    Map<String, String> streamConfigs = FakeStreamConfigUtils.getDefaultLowLevelStreamConfigs().getStreamConfigsMap();
+    // Missing replicasPerPartition
+    TableConfig invalidRealtimeTableConfig =
+        new TableConfigBuilder(TableType.REALTIME).setStreamConfigs(streamConfigs).setTableName(invalidRealtimeTable)
+            .setSchemaName(dummySchema.getSchemaName()).build();
+    try {
+      ControllerTestUtils.getHelixResourceManager().addTable(invalidRealtimeTableConfig);
+      Assert.fail(
+          "Table creation should have thrown exception due to missing replicasPerPartition in validation config");
+    } catch (Exception e) {
+      // expected
+    }
+
+    // Verify invalid table config is cleaned up
+    Assert.assertNull(ControllerTestUtils.getHelixResourceManager().getTableConfig(invalidRealtimeTable));
   }
 
   @Test

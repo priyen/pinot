@@ -46,14 +46,14 @@ import java.util.ArrayList;
 import java.util.List;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.spi.env.PinotConfiguration;
-import org.apache.pinot.spi.filesystem.PinotFS;
+import org.apache.pinot.spi.filesystem.BasePinotFS;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.google.common.base.Preconditions.checkState;
 
 
-public class GcsPinotFS extends PinotFS {
+public class GcsPinotFS extends BasePinotFS {
   public static final String PROJECT_ID = "projectId";
   public static final String GCP_KEY = "gcpKey";
 
@@ -122,14 +122,14 @@ public class GcsPinotFS extends PinotFS {
     GcsUri srcGcsUri = new GcsUri(srcUri);
     GcsUri dstGcsUri = new GcsUri(dstUri);
     if (copy(srcGcsUri, dstGcsUri)) {
-      // Only delete if all files were successfully moved
+      // Only delete if all files were successfully copied
       return delete(srcGcsUri, true);
     }
     return false;
   }
 
   @Override
-  public boolean copy(URI srcUri, URI dstUri)
+  public boolean copyDir(URI srcUri, URI dstUri)
       throws IOException {
     LOGGER.info("Copying uri {} to uri {}", srcUri, dstUri);
     return copy(new GcsUri(srcUri), new GcsUri(dstUri));
@@ -414,9 +414,11 @@ public class GcsPinotFS extends PinotFS {
     if (srcUri.equals(dstUri)) {
       return true;
     }
+    // copy directly if source is a single file.
     if (!existsDirectory(srcUri)) {
       return copyFile(srcUri, dstUri);
     }
+    // copy directory
     if (srcUri.hasSubpath(dstUri) || dstUri.hasSubpath(srcUri)) {
       throw new IOException(String.format("Cannot copy from or to a subdirectory: '%s' -> '%s'", srcUri, dstUri));
     }

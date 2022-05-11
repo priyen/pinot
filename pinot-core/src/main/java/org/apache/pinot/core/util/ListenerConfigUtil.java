@@ -19,7 +19,13 @@
 package org.apache.pinot.core.util;
 
 import com.google.common.base.Preconditions;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
+import java.net.URL;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -28,9 +34,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.pinot.common.config.TlsConfig;
+import org.apache.pinot.common.utils.TlsUtils;
 import org.apache.pinot.core.transport.ListenerConfig;
-import org.apache.pinot.core.transport.TlsConfig;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.glassfish.grizzly.http.server.HttpServer;
@@ -42,9 +50,11 @@ import org.glassfish.jersey.internal.guava.ThreadFactoryBuilder;
 import org.glassfish.jersey.process.JerseyProcessingUncaughtExceptionHandler;
 import org.glassfish.jersey.server.ResourceConfig;
 
+import static org.apache.pinot.spi.utils.CommonConstants.HTTPS_PROTOCOL;
+
 
 /**
- * Utility class that generates Http {@link ListenerConfig} instances 
+ * Utility class that generates Http {@link ListenerConfig} instances
  * based on the properties provided by a property namespace in {@link PinotConfiguration}.
  */
 public final class ListenerConfigUtil {
@@ -65,7 +75,7 @@ public final class ListenerConfigUtil {
    * @param config property holders for controller configuration
    * @param namespace property namespace to extract from
    *
-   * @return List of {@link ListenerConfig} for which http listeners 
+   * @return List of {@link ListenerConfig} for which http listeners
    * should be created.
    */
   public static List<ListenerConfig> buildListenerConfigs(PinotConfiguration config, String namespace,
@@ -76,9 +86,7 @@ public final class ListenerConfigUtil {
 
     String[] protocols = config.getProperty(namespace + DOT_ACCESS_PROTOCOLS).split(",");
 
-    return Arrays.stream(protocols).peek(protocol -> Preconditions
-        .checkArgument(SUPPORTED_PROTOCOLS.contains(protocol), "Unsupported protocol '%s' in config namespace '%s'",
-            protocol, namespace)).map(protocol -> buildListenerConfig(config, namespace, protocol, tlsDefaults))
+    return Arrays.stream(protocols).map(protocol -> buildListenerConfig(config, namespace, protocol, tlsDefaults))
         .collect(Collectors.toList());
   }
 
@@ -167,22 +175,36 @@ public final class ListenerConfigUtil {
     return listeners;
   }
 
-  private static ListenerConfig buildListenerConfig(PinotConfiguration config, String namespace, String protocol,
+  private static ListenerConfig buildListenerConfig(PinotConfiguration config, String namespace, String name,
       TlsConfig tlsConfig) {
-    String protocolNamespace = namespace + DOT_ACCESS_PROTOCOLS + "." + protocol;
+    String protocolNamespace = namespace + DOT_ACCESS_PROTOCOLS + "." + name;
 
-    return new ListenerConfig(protocol, getHost(config.getProperty(protocolNamespace + ".host", DEFAULT_HOST)),
-        getPort(config.getProperty(protocolNamespace + ".port")), protocol, tlsConfig);
+    return new ListenerConfig(name, getHost(config.getProperty(protocolNamespace + ".host", DEFAULT_HOST)),
+        getPort(config.getProperty(protocolNamespace + ".port")),
+        getProtocol(config.getProperty(protocolNamespace + ".protocol"), name),
+        TlsUtils.extractTlsConfig(config, protocolNamespace + ".tls", tlsConfig));
   }
 
   private static String getHost(String configuredHost) {
-    return Optional.ofNullable(configuredHost).filter(host -> !host.trim().isEmpty())
+    return Optional.ofNullable(configuredHost).map(String::trim).filter(host -> !host.isEmpty())
         .orElseThrow(() -> new IllegalArgumentException(configuredHost + " is not a valid host"));
   }
 
   private static int getPort(String configuredPort) {
-    return Optional.ofNullable(configuredPort).filter(port -> !port.trim().isEmpty()).<Integer>map(Integer::valueOf)
+    return Optional.ofNullable(configuredPort).map(String::trim).filter(port -> !port.isEmpty()).map(Integer::valueOf)
         .orElseThrow(() -> new IllegalArgumentException(configuredPort + " is not a valid port"));
+  }
+
+  private static String getProtocol(String configuredProtocol, String listenerName) {
+    Optional<String> optProtocol =
+        Optional.ofNullable(configuredProtocol).map(String::trim).filter(protocol -> !protocol.isEmpty());
+    if (!optProtocol.isPresent()) {
+      return Optional.of(listenerName).filter(SUPPORTED_PROTOCOLS::contains).orElseThrow(
+          () -> new IllegalArgumentException("No protocol set for listener" + listenerName + " and '" + listenerName
+              + "' is not a valid protocol either"));
+    }
+    return optProtocol.filter(SUPPORTED_PROTOCOLS::contains)
+        .orElseThrow(() -> new IllegalArgumentException(configuredProtocol + " is not a valid protocol"));
   }
 
   public static HttpServer buildHttpServer(ResourceConfig resConfig, List<ListenerConfig> listenerConfigs) {
@@ -213,23 +235,38 @@ public final class ListenerConfigUtil {
 
     if (CommonConstants.HTTPS_PROTOCOL.equals(listenerConfig.getProtocol())) {
       listener.setSecure(true);
-      listener.setSSLEngineConfig(buildSSLConfig(listenerConfig.getTlsConfig()));
+      listener.setSSLEngineConfig(buildSSLEngineConfigurator(listenerConfig.getTlsConfig()));
     }
 
     httpServer.addListener(listener);
   }
 
-  private static SSLEngineConfigurator buildSSLConfig(TlsConfig tlsConfig) {
+  /**
+   * Finds the last listener that has HTTPS protocol, and returns its port. If not found any TLS, return defaultValue
+   * @param configs the config to search
+   * @param defaultValue the default value if the TLS listener is not found
+   * @return the port number of last entry that has secure protocol. If not found then defaultValue
+   */
+  public static int findLastTlsPort(List<ListenerConfig> configs, int defaultValue) {
+    return configs.stream()
+        .filter(config -> config.getProtocol().equalsIgnoreCase(HTTPS_PROTOCOL))
+        .map(ListenerConfig::getPort)
+        .reduce((first, second) -> second)
+        .orElse(defaultValue);
+  }
+
+  private static SSLEngineConfigurator buildSSLEngineConfigurator(TlsConfig tlsConfig) {
     SSLContextConfigurator sslContextConfigurator = new SSLContextConfigurator();
 
     if (tlsConfig.getKeyStorePath() != null) {
       Preconditions.checkNotNull(tlsConfig.getKeyStorePassword(), "key store password required");
-      sslContextConfigurator.setKeyStoreFile(tlsConfig.getKeyStorePath());
+      sslContextConfigurator.setKeyStoreFile(cacheInTempFile(tlsConfig.getKeyStorePath()).getAbsolutePath());
       sslContextConfigurator.setKeyStorePass(tlsConfig.getKeyStorePassword());
     }
+
     if (tlsConfig.getTrustStorePath() != null) {
       Preconditions.checkNotNull(tlsConfig.getKeyStorePassword(), "trust store password required");
-      sslContextConfigurator.setTrustStoreFile(tlsConfig.getTrustStorePath());
+      sslContextConfigurator.setTrustStoreFile(cacheInTempFile(tlsConfig.getTrustStorePath()).getAbsolutePath());
       sslContextConfigurator.setTrustStorePass(tlsConfig.getTrustStorePassword());
     }
 
@@ -241,5 +278,26 @@ public final class ListenerConfigUtil {
     return StringUtils.join(listenerConfigs.stream()
         .map(listener -> String.format("%s://%s:%d", listener.getProtocol(), listener.getHost(), listener.getPort()))
         .toArray(), ", ");
+  }
+
+  private static File cacheInTempFile(String sourceUrl) {
+    try {
+      URL url = TlsUtils.makeKeyStoreUrl(sourceUrl);
+      if ("file".equals(url.getProtocol())) {
+        return new File(url.getPath());
+      }
+
+      File tempFile = Files.createTempFile("pinot-keystore-", null).toFile();
+      tempFile.deleteOnExit();
+
+      try (InputStream is = url.openStream();
+          OutputStream os = new FileOutputStream(tempFile)) {
+        IOUtils.copy(is, os);
+      }
+
+      return tempFile;
+    } catch (Exception e) {
+      throw new IllegalStateException(String.format("Could not retrieve and cache keystore from '%s'", sourceUrl), e);
+    }
   }
 }

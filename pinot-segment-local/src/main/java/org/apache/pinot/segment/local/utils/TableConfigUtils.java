@@ -22,6 +22,8 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableSet;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -49,14 +51,17 @@ import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.config.table.TierConfig;
 import org.apache.pinot.spi.config.table.UpsertConfig;
 import org.apache.pinot.spi.config.table.ingestion.BatchIngestionConfig;
+import org.apache.pinot.spi.config.table.ingestion.ComplexTypeConfig;
 import org.apache.pinot.spi.config.table.ingestion.FilterConfig;
 import org.apache.pinot.spi.config.table.ingestion.IngestionConfig;
+import org.apache.pinot.spi.config.table.ingestion.StreamIngestionConfig;
 import org.apache.pinot.spi.config.table.ingestion.TransformConfig;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.ingestion.batch.BatchConfig;
 import org.apache.pinot.spi.stream.StreamConfig;
+import org.apache.pinot.spi.stream.StreamConfigProperties;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.DataSizeUtils;
 import org.apache.pinot.spi.utils.IngestionConfigUtils;
@@ -77,8 +82,20 @@ public final class TableConfigUtils {
   private static final Logger LOGGER = LoggerFactory.getLogger(TableConfigUtils.class);
   private static final String SCHEDULE_KEY = "schedule";
   private static final String STAR_TREE_CONFIG_NAME = "StarTreeIndex Config";
+
   // supported TableTaskTypes, must be identical to the one return in the impl of {@link PinotTaskGenerator}.
   private static final String REALTIME_TO_OFFLINE_TASK_TYPE = "RealtimeToOfflineSegmentsTask";
+
+  // this is duplicate with KinesisConfig.STREAM_TYPE, while instead of use KinesisConfig.STREAM_TYPE directly, we
+  // hardcode the value here to avoid pulling the entire pinot-kinesis module as dependency.
+  private static final String KINESIS_STREAM_TYPE = "kinesis";
+
+  /**
+   * @see TableConfigUtils#validate(TableConfig, Schema, String, boolean)
+   */
+  public static void validate(TableConfig tableConfig, @Nullable Schema schema) {
+    validate(tableConfig, schema, null, false);
+  }
 
   /**
    * Performs table config validations. Includes validations for the following:
@@ -90,20 +107,35 @@ public final class TableConfigUtils {
    *
    * TODO: Add more validations for each section (e.g. validate conditions are met for aggregateMetrics)
    */
-  public static void validate(TableConfig tableConfig, @Nullable Schema schema) {
+  public static void validate(TableConfig tableConfig, @Nullable Schema schema, @Nullable String typesToSkip,
+      boolean disableGroovy) {
+    Set<ValidationType> skipTypes = parseTypesToSkipString(typesToSkip);
     if (tableConfig.getTableType() == TableType.REALTIME) {
       Preconditions.checkState(schema != null, "Schema should not be null for REALTIME table");
     }
     // Sanitize the table config before validation
     sanitize(tableConfig);
-    validateValidationConfig(tableConfig, schema);
-    validateIngestionConfig(tableConfig, schema);
-    validateTierConfigList(tableConfig.getTierConfigsList());
-    validateIndexingConfig(tableConfig.getIndexingConfig(), schema);
-    validateFieldConfigList(tableConfig.getFieldConfigList(), tableConfig.getIndexingConfig(), schema);
-    validateUpsertConfig(tableConfig, schema);
-    validatePartialUpsertStrategies(tableConfig, schema);
-    validateTaskConfigs(tableConfig, schema);
+    // skip all validation if skip type ALL is selected.
+    if (!skipTypes.contains(ValidationType.ALL)) {
+      validateValidationConfig(tableConfig, schema);
+      validateIngestionConfig(tableConfig, schema, disableGroovy);
+      validateTierConfigList(tableConfig.getTierConfigsList());
+      validateIndexingConfig(tableConfig.getIndexingConfig(), schema);
+      validateFieldConfigList(tableConfig.getFieldConfigList(), tableConfig.getIndexingConfig(), schema);
+      if (!skipTypes.contains(ValidationType.UPSERT)) {
+        validateUpsertConfig(tableConfig, schema);
+        validatePartialUpsertStrategies(tableConfig, schema);
+      }
+      if (!skipTypes.contains(ValidationType.TASK)) {
+        validateTaskConfigs(tableConfig, schema);
+      }
+    }
+  }
+
+  private static Set<ValidationType> parseTypesToSkipString(@Nullable String typesToSkip) {
+    return typesToSkip == null ? Collections.emptySet() : Arrays.stream(typesToSkip.split(","))
+        .map(s -> ValidationType.valueOf(s.toUpperCase()))
+        .collect(Collectors.toSet());
   }
 
   /**
@@ -196,12 +228,12 @@ public final class TableConfigUtils {
       }
     }
 
-    if (validationConfig.isAllowNullTimeValue()) {
-      Preconditions.checkState(timeColumnName != null && !timeColumnName.isEmpty(),
-          "'timeColumnName' should exist if null time value is allowed");
-    }
-
     validateRetentionConfig(tableConfig);
+  }
+
+  @VisibleForTesting
+  public static void validateIngestionConfig(TableConfig tableConfig, @Nullable Schema schema) {
+    validateIngestionConfig(tableConfig, schema, false);
   }
 
   /**
@@ -214,7 +246,7 @@ public final class TableConfigUtils {
    * 6. ingestion type for dimension tables
    */
   @VisibleForTesting
-  public static void validateIngestionConfig(TableConfig tableConfig, @Nullable Schema schema) {
+  public static void validateIngestionConfig(TableConfig tableConfig, @Nullable Schema schema, boolean disableGroovy) {
     IngestionConfig ingestionConfig = tableConfig.getIngestionConfig();
 
     if (ingestionConfig != null) {
@@ -262,6 +294,10 @@ public final class TableConfigUtils {
       if (filterConfig != null) {
         String filterFunction = filterConfig.getFilterFunction();
         if (filterFunction != null) {
+          if (disableGroovy && FunctionEvaluatorFactory.isGroovyExpression(filterFunction)) {
+            throw new IllegalStateException(
+                "Groovy filter functions are disabled for table config. Found '" + filterFunction + "'");
+          }
           try {
             FunctionEvaluatorFactory.getExpressionEvaluator(filterFunction);
           } catch (Exception e) {
@@ -289,17 +325,38 @@ public final class TableConfigUtils {
             throw new IllegalStateException("Duplicate transform config found for column '" + columnName + "'");
           }
           FunctionEvaluator expressionEvaluator;
+          if (disableGroovy && FunctionEvaluatorFactory.isGroovyExpression(transformFunction)) {
+            throw new IllegalStateException(
+                "Groovy transform functions are disabled for table config. Found '" + transformFunction
+                    + "' for column '" + columnName + "'");
+          }
           try {
             expressionEvaluator = FunctionEvaluatorFactory.getExpressionEvaluator(transformFunction);
           } catch (Exception e) {
             throw new IllegalStateException(
-                "Invalid transform function '" + transformFunction + "' for column '" + columnName + "'");
+                "Invalid transform function '" + transformFunction + "' for column '" + columnName + "'", e);
           }
           List<String> arguments = expressionEvaluator.getArguments();
           if (arguments.contains(columnName)) {
             throw new IllegalStateException(
                 "Arguments of a transform function '" + arguments + "' cannot contain the destination column '"
                     + columnName + "'");
+          }
+        }
+      }
+
+      // Complex configs
+      ComplexTypeConfig complexTypeConfig = ingestionConfig.getComplexTypeConfig();
+      if (complexTypeConfig != null && schema != null) {
+        Map<String, String> prefixesToRename = complexTypeConfig.getPrefixesToRename();
+        Set<String> fieldNames = schema.getFieldSpecMap().keySet();
+        if (MapUtils.isNotEmpty(prefixesToRename)) {
+          for (String prefix : prefixesToRename.keySet()) {
+            for (String field : fieldNames) {
+              Preconditions.checkState(!field.startsWith(prefix),
+                      "Fields in the schema may not begin with any prefix specified in the prefixesToRename"
+                              + " config. Name conflict with field: " + field + " and prefix: " + prefix);
+            }
           }
         }
       }
@@ -331,7 +388,7 @@ public final class TableConfigUtils {
         if (taskTypeConfigName.equals(REALTIME_TO_OFFLINE_TASK_TYPE)) {
           // check table is not upsert
           Preconditions.checkState(tableConfig.getUpsertMode() == UpsertConfig.Mode.NONE,
-              "RealtimeToOfflineTask doesn't support upsert ingestion mode!");
+              "RealtimeToOfflineTask doesn't support upsert table!");
           // check no malformed period
           TimeUtils.convertPeriodToMillis(taskTypeConfig.getOrDefault("bufferTimePeriod", "2d"));
           TimeUtils.convertPeriodToMillis(taskTypeConfig.getOrDefault("bucketTimePeriod", "1d"));
@@ -464,7 +521,7 @@ public final class TableConfigUtils {
                 segmentSelectorType, tierName);
         Preconditions.checkState(TimeUtils.isPeriodValid(segmentAge),
             "segmentAge: %s must be a valid period string (eg. 30d, 24h) in tier: %s", segmentAge, tierName);
-      } else {
+      } else if (!segmentSelectorType.equalsIgnoreCase(TierFactory.FIXED_SEGMENT_SELECTOR_TYPE)) {
         throw new IllegalStateException(
             "Unsupported segmentSelectorType: " + segmentSelectorType + " in tier: " + tierName);
       }
@@ -685,6 +742,10 @@ public final class TableConfigUtils {
               Preconditions.checkState(fieldConfigColSpec.getDataType().getStoredType() == DataType.STRING,
                   "TEXT Index is only supported for string columns");
               break;
+            case TIMESTAMP:
+              Preconditions.checkState(fieldConfigColSpec.getDataType() == DataType.TIMESTAMP,
+                  "TIMESTAMP Index is only supported for timestamp columns");
+              break;
             default:
               break;
           }
@@ -827,5 +888,59 @@ public final class TableConfigUtils {
           "Time column names are different for table: %s! Offline time column name: %s. Realtime time column name: %s",
           rawTableName, offlineTimeColumnName, realtimeTimeColumnName));
     }
+  }
+
+  // enum of all the skip-able validation types.
+  public enum ValidationType {
+    ALL, TASK, UPSERT
+  }
+
+  /**
+   * needsEmptySegmentPruner checks if EmptySegmentPruner is needed for a TableConfig.
+   * @param tableConfig Input table config.
+   */
+  public static boolean needsEmptySegmentPruner(TableConfig tableConfig) {
+    if (isKinesisConfigured(tableConfig)) {
+      return true;
+    }
+    RoutingConfig routingConfig = tableConfig.getRoutingConfig();
+    if (routingConfig == null) {
+      return false;
+    }
+    List<String> segmentPrunerTypes = routingConfig.getSegmentPrunerTypes();
+    if (segmentPrunerTypes == null || segmentPrunerTypes.isEmpty()) {
+      return false;
+    }
+    for (String segmentPrunerType : segmentPrunerTypes) {
+      if (RoutingConfig.EMPTY_SEGMENT_PRUNER_TYPE.equalsIgnoreCase(segmentPrunerType)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isKinesisConfigured(TableConfig tableConfig) {
+    IndexingConfig indexingConfig = tableConfig.getIndexingConfig();
+    if (indexingConfig != null) {
+      Map<String, String> streamConfig = indexingConfig.getStreamConfigs();
+      if (streamConfig != null && KINESIS_STREAM_TYPE.equals(
+          streamConfig.get(StreamConfigProperties.STREAM_TYPE))) {
+        return true;
+      }
+    }
+    IngestionConfig ingestionConfig = tableConfig.getIngestionConfig();
+    if (ingestionConfig == null) {
+      return false;
+    }
+    StreamIngestionConfig streamIngestionConfig = ingestionConfig.getStreamIngestionConfig();
+    if (streamIngestionConfig == null) {
+      return false;
+    }
+    for (Map<String, String> config : streamIngestionConfig.getStreamConfigMaps()) {
+      if (config != null && KINESIS_STREAM_TYPE.equals(config.get(StreamConfigProperties.STREAM_TYPE))) {
+        return true;
+      }
+    }
+    return false;
   }
 }

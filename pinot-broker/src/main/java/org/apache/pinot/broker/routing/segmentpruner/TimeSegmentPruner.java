@@ -41,16 +41,13 @@ import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.request.Expression;
 import org.apache.pinot.common.request.Function;
 import org.apache.pinot.common.request.Identifier;
-import org.apache.pinot.common.request.PinotQuery;
-import org.apache.pinot.common.utils.request.FilterQueryTree;
-import org.apache.pinot.common.utils.request.RequestUtils;
-import org.apache.pinot.pql.parsers.pql2.ast.FilterKind;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.data.DateTimeFieldSpec;
 import org.apache.pinot.spi.data.DateTimeFormatSpec;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.CommonConstants.Query.Range;
+import org.apache.pinot.sql.FilterKind;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -158,29 +155,18 @@ public class TimeSegmentPruner implements SegmentPruner {
   @Override
   public Set<String> prune(BrokerRequest brokerRequest, Set<String> segments) {
     IntervalTree<String> intervalTree = _intervalTree;
-
-    List<Interval> intervals;
-    PinotQuery pinotQuery = brokerRequest.getPinotQuery();
-    if (pinotQuery != null) {
-      // SQL
-      Expression filterExpression = pinotQuery.getFilterExpression();
-      if (filterExpression == null) {
-        return segments;
-      }
-      intervals = getFilterTimeIntervals(filterExpression);
-    } else {
-      // PQL
-      FilterQueryTree filterQueryTree = RequestUtils.generateFilterQueryTree(brokerRequest);
-      if (filterQueryTree == null) {
-        return segments;
-      }
-      intervals = getFilterTimeIntervals(filterQueryTree);
-    }
-
-    if (intervals == null) { // cannot prune based on time for input request
+    Expression filterExpression = brokerRequest.getPinotQuery().getFilterExpression();
+    if (filterExpression == null) {
       return segments;
     }
-    if (intervals.isEmpty()) { // invalid query time interval
+
+    List<Interval> intervals = getFilterTimeIntervals(filterExpression);
+    if (intervals == null) {
+      // Cannot prune based on time for input request
+      return segments;
+    }
+    if (intervals.isEmpty()) {
+      // Invalid query time interval
       return Collections.emptySet();
     }
 
@@ -200,6 +186,10 @@ public class TimeSegmentPruner implements SegmentPruner {
    *         < 50 OR firstName = Jason')
    *         Empty list if time condition is specified but invalid (e.g. 'SELECT * from myTable where time < 50 AND
    *         time > 100')
+   *         Sorted time intervals without overlapping if time condition is valid
+   *
+   * TODO: 1. Merge adjacent intervals
+   *       2. Set interval boundary using time granularity instead of millis
    */
   @Nullable
   private List<Interval> getFilterTimeIntervals(Expression filterExpression) {
@@ -233,6 +223,14 @@ public class TimeSegmentPruner implements SegmentPruner {
           }
         }
         return getUnionSortedIntervals(orIntervals);
+      case NOT:
+        assert operands.size() == 1;
+        List<Interval> childIntervals = getFilterTimeIntervals(operands.get(0));
+        if (childIntervals == null) {
+          return null;
+        } else {
+          return getComplementSortedIntervals(childIntervals);
+        }
       case EQUALS: {
         Identifier identifier = operands.get(0).getIdentifier();
         if (identifier != null && identifier.getName().equals(_timeColumn)) {
@@ -329,68 +327,6 @@ public class TimeSegmentPruner implements SegmentPruner {
     }
   }
 
-  /**
-   * @return Null if no time condition or cannot filter base on the condition (e.g. 'SELECT * from myTable where time
-   *         < 50 OR firstName = Jason')
-   *         Empty list if time condition is specified but invalid (e.g. 'SELECT * from myTable where time < 50 AND
-   *         time > 100')
-   */
-  @Deprecated
-  @Nullable
-  private List<Interval> getFilterTimeIntervals(FilterQueryTree filterQueryTree) {
-    switch (filterQueryTree.getOperator()) {
-      case AND:
-        List<List<Interval>> andIntervals = new ArrayList<>();
-        for (FilterQueryTree child : filterQueryTree.getChildren()) {
-          List<Interval> childIntervals = getFilterTimeIntervals(child);
-          if (childIntervals != null) {
-            if (childIntervals.isEmpty()) {
-              return Collections.emptyList();
-            }
-            andIntervals.add(childIntervals);
-          }
-        }
-        if (andIntervals.isEmpty()) {
-          return null;
-        }
-        return getIntersectionSortedIntervals(andIntervals);
-      case OR:
-        List<List<Interval>> orIntervals = new ArrayList<>();
-        for (FilterQueryTree child : filterQueryTree.getChildren()) {
-          List<Interval> childIntervals = getFilterTimeIntervals(child);
-          if (childIntervals == null) {
-            return null;
-          } else {
-            orIntervals.add(childIntervals);
-          }
-        }
-        return getUnionSortedIntervals(orIntervals);
-      case EQUALITY:
-        if (filterQueryTree.getColumn().equals(_timeColumn)) {
-          long timeStamp = _timeFormatSpec.fromFormatToMillis(filterQueryTree.getValue().get(0));
-          return Collections.singletonList(new Interval(timeStamp, timeStamp));
-        }
-        return null;
-      case IN:
-        if (filterQueryTree.getColumn().equals(_timeColumn)) {
-          List<Interval> intervals = new ArrayList<>(filterQueryTree.getValue().size());
-          for (String value : filterQueryTree.getValue()) {
-            long timeStamp = _timeFormatSpec.fromFormatToMillis(value);
-            intervals.add(new Interval(timeStamp, timeStamp));
-          }
-          return intervals;
-        }
-        return null;
-      case RANGE:
-        if (filterQueryTree.getColumn().equals(_timeColumn)) {
-          return parseInterval(filterQueryTree.getValue().get(0));
-        }
-        return null;
-      default:
-        return null;
-    }
-  }
-
   private List<Interval> getIntersectionSortedIntervals(List<List<Interval>> intervals) {
     // Requires input intervals are sorted, the return intervals will be sorted
     return getIntersectionSortedIntervals(intervals, 0, intervals.size());
@@ -475,6 +411,25 @@ public class TimeSegmentPruner implements SegmentPruner {
         res.set(resSize - 1, Interval.getUnion(interval, res.get(resSize - 1)));
       }
     }
+    return res;
+  }
+
+  /**
+   * Returns the complement (non-overlapping sorted intervals) of the given non-overlapping sorted intervals.
+   */
+  private List<Interval> getComplementSortedIntervals(List<Interval> intervals) {
+    List<Interval> res = new ArrayList<>();
+    long startTime = MIN_START_TIME;
+    for (Interval interval : intervals) {
+      if (interval._min > startTime) {
+        res.add(new Interval(startTime, interval._min - 1));
+      }
+      if (interval._max == MAX_END_TIME) {
+        return res;
+      }
+      startTime = interval._max + 1;
+    }
+    res.add(new Interval(startTime, MAX_END_TIME));
     return res;
   }
 

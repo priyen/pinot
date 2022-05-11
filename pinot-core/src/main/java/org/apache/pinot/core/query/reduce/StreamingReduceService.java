@@ -18,14 +18,13 @@
  */
 package org.apache.pinot.core.query.reduce;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 import org.apache.pinot.common.metrics.BrokerMetrics;
@@ -36,7 +35,7 @@ import org.apache.pinot.common.response.broker.BrokerResponseNative;
 import org.apache.pinot.common.utils.DataTable;
 import org.apache.pinot.core.common.datatable.DataTableFactory;
 import org.apache.pinot.core.query.request.context.QueryContext;
-import org.apache.pinot.core.query.request.context.utils.BrokerRequestToQueryContextConverter;
+import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.apache.pinot.core.transport.ServerRoutingInstance;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.CommonConstants;
@@ -59,7 +58,8 @@ public class StreamingReduceService extends BaseReduceService {
 
   public BrokerResponseNative reduceOnStreamResponse(BrokerRequest brokerRequest,
       Map<ServerRoutingInstance, Iterator<Server.ServerResponse>> serverResponseMap, long reduceTimeOutMs,
-      @Nullable BrokerMetrics brokerMetrics) throws IOException {
+      @Nullable BrokerMetrics brokerMetrics)
+      throws IOException {
     if (serverResponseMap.isEmpty()) {
       // Empty response.
       return BrokerResponseNative.empty();
@@ -67,14 +67,12 @@ public class StreamingReduceService extends BaseReduceService {
 
     // prepare contextual info for reduce.
     PinotQuery pinotQuery = brokerRequest.getPinotQuery();
-    Map<String, String> queryOptions =
-        pinotQuery != null ? pinotQuery.getQueryOptions() : brokerRequest.getQueryOptions();
+    Map<String, String> queryOptions = pinotQuery.getQueryOptions();
     boolean enableTrace =
         queryOptions != null && Boolean.parseBoolean(queryOptions.get(CommonConstants.Broker.Request.TRACE));
 
-    QueryContext queryContext = BrokerRequestToQueryContextConverter.convert(brokerRequest);
-
-    String tableName = brokerRequest.getQuerySource().getTableName();
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(pinotQuery);
+    String tableName = queryContext.getTableName();
     String rawTableName = TableNameBuilder.extractRawTableName(tableName);
 
     // initialize empty response.
@@ -106,15 +104,18 @@ public class StreamingReduceService extends BaseReduceService {
     return brokerResponseNative;
   }
 
-  private static void processIterativeServerResponse(StreamingReducer reducer, ExecutorService executorService,
+  @VisibleForTesting
+  static void processIterativeServerResponse(StreamingReducer reducer, ExecutorService executorService,
       Map<ServerRoutingInstance, Iterator<Server.ServerResponse>> serverResponseMap, long reduceTimeOutMs,
-      ExecutionStatsAggregator aggregator) throws Exception {
+      ExecutionStatsAggregator aggregator)
+      throws Exception {
     int cnt = 0;
-    Future[] futures = new Future[serverResponseMap.size()];
-    CountDownLatch countDownLatch = new CountDownLatch(serverResponseMap.size());
-
-    for (Map.Entry<ServerRoutingInstance, Iterator<Server.ServerResponse>> entry: serverResponseMap.entrySet()) {
-      futures[cnt++] = executorService.submit(() -> {
+    CompletableFuture<Void>[] futures = new CompletableFuture[serverResponseMap.size()];
+    // based on ideas from on https://stackoverflow.com/questions/19348248/waiting-on-a-list-of-future
+    // and https://stackoverflow.com/questions/23301598/transform-java-future-into-a-completablefuture
+    // Future created via ExecutorService.submit() can be created by CompletableFuture.supplyAsync()
+    for (Map.Entry<ServerRoutingInstance, Iterator<Server.ServerResponse>> entry : serverResponseMap.entrySet()) {
+      futures[cnt++] = CompletableFuture.runAsync(() -> {
         Iterator<Server.ServerResponse> streamingResponses = entry.getValue();
         try {
           while (streamingResponses.hasNext()) {
@@ -128,22 +129,17 @@ public class StreamingReduceService extends BaseReduceService {
             }
           }
         } catch (Exception e) {
+          LOGGER.error("Unable to process streaming response. Failure occurred!", e);
           throw new RuntimeException("Unable to process streaming response. Failure occurred!", e);
-        } finally {
-          countDownLatch.countDown();
         }
-      });
+      }, executorService);
     }
-
+    CompletableFuture<Void> syncWaitPoint = CompletableFuture.allOf(futures);
     try {
-      countDownLatch.await(reduceTimeOutMs, TimeUnit.MILLISECONDS);
-    } catch (InterruptedException e) {
-      for (Future future : futures) {
-        if (!future.isDone()) {
-          future.cancel(true);
-        }
-      }
-      throw new TimeoutException("Timed out in broker reduce phase.");
+      syncWaitPoint.get(reduceTimeOutMs, TimeUnit.MILLISECONDS);
+    } catch (Exception ex) {
+      syncWaitPoint.cancel(true);
+      throw ex;
     }
   }
 

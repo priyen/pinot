@@ -46,7 +46,14 @@
     </file>
     <!-- Start Include Pinot Plugins-->
     <!-- Start Include Pinot Stream Ingestion Plugins-->
-    <!-- Only Include Specified Kafka Version Plugin-->
+    <file>
+      <source>
+        ${pinot.root}/pinot-plugins/pinot-stream-ingestion/pinot-kafka-0.9/target/pinot-kafka-0.9-${project.version}-shaded.jar
+      </source>
+      <destName>
+        plugins/pinot-stream-ingestion/pinot-kafka-0.9/pinot-kafka-0.9-${project.version}-shaded.jar
+      </destName>
+    </file>
     <file>
       <source>
         ${pinot.root}/pinot-plugins/pinot-stream-ingestion/pinot-kafka-${kafka.version}/target/pinot-kafka-${kafka.version}-${project.version}-shaded.jar
@@ -84,7 +91,7 @@
         ${pinot.root}/pinot-plugins/pinot-batch-ingestion/pinot-batch-ingestion-hadoop/target/pinot-batch-ingestion-hadoop-${project.version}-shaded.jar
       </source>
       <destName>
-        plugins/pinot-batch-ingestion/pinot-batch-ingestion-hadoop/pinot-batch-ingestion-hadoop-${project.version}-shaded.jar
+        plugins-external/pinot-batch-ingestion/pinot-batch-ingestion-hadoop/pinot-batch-ingestion-hadoop-${project.version}-shaded.jar
       </destName>
     </file>
     <file>
@@ -92,7 +99,7 @@
         ${pinot.root}/pinot-plugins/pinot-batch-ingestion/pinot-batch-ingestion-spark/target/pinot-batch-ingestion-spark-${project.version}-shaded.jar
       </source>
       <destName>
-        plugins/pinot-batch-ingestion/pinot-batch-ingestion-spark/pinot-batch-ingestion-spark-${project.version}-shaded.jar
+        plugins-external/pinot-batch-ingestion/pinot-batch-ingestion-spark/pinot-batch-ingestion-spark-${project.version}-shaded.jar
       </destName>
     </file>
     <!-- End Include Pinot Batch Ingestion Plugins-->

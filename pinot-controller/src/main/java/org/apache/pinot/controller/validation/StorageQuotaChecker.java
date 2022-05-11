@@ -19,8 +19,6 @@
 package org.apache.pinot.controller.validation;
 
 import com.google.common.base.Preconditions;
-import java.util.Set;
-import javax.inject.Inject;
 import org.apache.pinot.common.exception.InvalidConfigException;
 import org.apache.pinot.common.metrics.ControllerGauge;
 import org.apache.pinot.common.metrics.ControllerMetrics;
@@ -28,10 +26,10 @@ import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.util.TableSizeReader;
 import org.apache.pinot.spi.config.table.QuotaConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
-import org.apache.pinot.spi.config.table.TenantConfig;
 import org.apache.pinot.spi.utils.DataSizeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 
 /**
  * Class to check if a new segment is within the configured storage quota for the table
@@ -40,20 +38,20 @@ import org.slf4j.LoggerFactory;
 public class StorageQuotaChecker {
   private static final Logger LOGGER = LoggerFactory.getLogger(StorageQuotaChecker.class);
 
-  @Inject
-  PinotHelixResourceManager _pinotHelixResourceManager;
-
   private final TableSizeReader _tableSizeReader;
   private final TableConfig _tableConfig;
   private final ControllerMetrics _controllerMetrics;
   private final boolean _isLeaderForTable;
+  private final PinotHelixResourceManager _pinotHelixResourceManager;
 
   public StorageQuotaChecker(TableConfig tableConfig, TableSizeReader tableSizeReader,
-      ControllerMetrics controllerMetrics, boolean isLeaderForTable) {
+      ControllerMetrics controllerMetrics, boolean isLeaderForTable,
+      PinotHelixResourceManager pinotHelixResourceManager) {
     _tableConfig = tableConfig;
     _tableSizeReader = tableSizeReader;
     _controllerMetrics = controllerMetrics;
     _isLeaderForTable = isLeaderForTable;
+    _pinotHelixResourceManager = pinotHelixResourceManager;
   }
 
   public static class QuotaCheckerResponse {
@@ -86,17 +84,7 @@ public class StorageQuotaChecker {
     // 3. update predicted segment sizes
     // 4. is the updated size within quota
     QuotaConfig quotaConfig = _tableConfig.getQuotaConfig();
-    int numReplicas;
-
-    if (_tableConfig.isDimTable()) {
-      // If the table is a dimension table then fetch the tenant config and get the number of server belonging
-      // to the tenant
-      TenantConfig tenantConfig = _tableConfig.getTenantConfig();
-      Set<String> serverInstances = _pinotHelixResourceManager.getAllInstancesForServerTenant(tenantConfig.getServer());
-      numReplicas = serverInstances.size();
-    } else {
-      numReplicas = _tableConfig.getValidationConfig().getReplicationNumber();
-    }
+    int numReplicas = _pinotHelixResourceManager.getNumReplicas(_tableConfig);
 
     final String tableNameWithType = _tableConfig.getTableName();
 
@@ -127,10 +115,9 @@ public class StorageQuotaChecker {
 
     if (tableSubtypeSize._missingSegments > 0) {
       if (tableSubtypeSize._estimatedSizeInBytes > allowedStorageBytes) {
-        return failure(
-            "Table " + tableNameWithType + " already over quota. Estimated size for all replicas is " + DataSizeUtils
-                .fromBytes(tableSubtypeSize._estimatedSizeInBytes) + ". Configured size for " + numReplicas + " is "
-                + DataSizeUtils.fromBytes(allowedStorageBytes));
+        return failure("Table " + tableNameWithType + " already over quota. Estimated size for all replicas is "
+            + DataSizeUtils.fromBytes(tableSubtypeSize._estimatedSizeInBytes) + ". Configured size for " + numReplicas
+            + " is " + DataSizeUtils.fromBytes(allowedStorageBytes));
       } else {
         return success("Missing size report for " + tableSubtypeSize._missingSegments
             + " segments. Bypassing storage quota check for " + tableNameWithType);

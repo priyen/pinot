@@ -27,14 +27,22 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.annotation.Nullable;
+import org.I0Itec.zkclient.IZkChildListener;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.helix.AccessOption;
 import org.apache.helix.task.TaskState;
+import org.apache.pinot.common.exception.TableNotFoundException;
 import org.apache.pinot.common.metrics.ControllerGauge;
 import org.apache.pinot.common.metrics.ControllerMeter;
 import org.apache.pinot.common.metrics.ControllerMetrics;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.controller.LeadControllerManager;
+import org.apache.pinot.controller.api.exception.NoTaskScheduledException;
+import org.apache.pinot.controller.api.exception.TaskAlreadyExistsException;
+import org.apache.pinot.controller.api.exception.UnknownTaskTypeException;
 import org.apache.pinot.controller.helix.core.PinotHelixResourceManager;
 import org.apache.pinot.controller.helix.core.minion.generator.PinotTaskGenerator;
 import org.apache.pinot.controller.helix.core.minion.generator.TaskGeneratorRegistry;
@@ -42,6 +50,8 @@ import org.apache.pinot.controller.helix.core.periodictask.ControllerPeriodicTas
 import org.apache.pinot.core.minion.PinotTaskConfig;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableTaskConfig;
+import org.apache.pinot.spi.utils.CommonConstants;
+import org.apache.pinot.spi.utils.builder.TableNameBuilder;
 import org.quartz.CronScheduleBuilder;
 import org.quartz.JobBuilder;
 import org.quartz.JobDataMap;
@@ -88,6 +98,8 @@ public class PinotTaskManager extends ControllerPeriodicTask<Void> {
   private final Map<String, TaskTypeMetricsUpdater> _taskTypeMetricsUpdaterMap = new ConcurrentHashMap<>();
   private final Map<TaskState, Integer> _taskStateToCountMap = new ConcurrentHashMap<>();
 
+  private final ZkTableConfigChangeListener _zkTableConfigChangeListener = new ZkTableConfigChangeListener();
+
   public PinotTaskManager(PinotHelixTaskResourceManager helixTaskResourceManager,
       PinotHelixResourceManager helixResourceManager, LeadControllerManager leadControllerManager,
       ControllerConf controllerConf, ControllerMetrics controllerMetrics) {
@@ -104,38 +116,125 @@ public class PinotTaskManager extends ControllerPeriodicTask<Void> {
       try {
         _scheduler = new StdSchedulerFactory().getScheduler();
         _scheduler.start();
-        LOGGER.info("Subscribe to tables change under PropertyStore path: {}", TABLE_CONFIG_PARENT_PATH);
-        _pinotHelixResourceManager.getPropertyStore().subscribeChildChanges(TABLE_CONFIG_PARENT_PATH,
-            (parentPath, tables) -> {
-              if (_tableTaskSchedulerUpdaterMap.isEmpty()) {
-                // Initial setup
-                for (String tableNameWithType : tables) {
-                  subscribeTableConfigChanges(tableNameWithType);
-                }
-              } else {
-                Set<String> existingTables = new HashSet<>(_tableTaskSchedulerUpdaterMap.keySet());
-                Set<String> tablesToAdd = new HashSet<>();
-                for (String tableNameWithType : tables) {
-                  if (!existingTables.remove(tableNameWithType)) {
-                    tablesToAdd.add(tableNameWithType);
-                  }
-                }
-                for (String tableNameWithType : tablesToAdd) {
-                  subscribeTableConfigChanges(tableNameWithType);
-                }
-                if (!existingTables.isEmpty()) {
-                  LOGGER.info("Found tables to clean up cron task scheduler: {}", existingTables);
-                  for (String tableNameWithType : existingTables) {
-                    cleanUpCronTaskSchedulerForTable(tableNameWithType);
-                  }
-                }
-              }
-            });
+        synchronized (_zkTableConfigChangeListener) {
+          // Subscribe child changes before reading the data to avoid missing changes
+          LOGGER.info("Check and subscribe to tables change under PropertyStore path: {}", TABLE_CONFIG_PARENT_PATH);
+          _pinotHelixResourceManager.getPropertyStore()
+              .subscribeChildChanges(TABLE_CONFIG_PARENT_PATH, _zkTableConfigChangeListener);
+          List<String> tables = _pinotHelixResourceManager.getPropertyStore()
+              .getChildNames(TABLE_CONFIG_PARENT_PATH, AccessOption.PERSISTENT);
+          if (CollectionUtils.isNotEmpty(tables)) {
+            checkTableConfigChanges(tables);
+          }
+        }
       } catch (SchedulerException e) {
         throw new RuntimeException("Caught exception while setting up the scheduler", e);
       }
     } else {
       _scheduler = null;
+    }
+  }
+
+  public Map<String, String> createTask(String taskType, String tableName, @Nullable String taskName,
+      Map<String, String> taskConfigs)
+      throws Exception {
+    if (taskName == null) {
+      taskName = tableName + "_" + UUID.randomUUID();
+      LOGGER.info("Task name is missing, auto-generate one: {}", taskName);
+    }
+    String minionInstanceTag =
+        taskConfigs.getOrDefault("minionInstanceTag", CommonConstants.Helix.UNTAGGED_MINION_INSTANCE);
+    _helixTaskResourceManager.ensureTaskQueueExists(taskType);
+    addTaskTypeMetricsUpdaterIfNeeded(taskType);
+    String parentTaskName = _helixTaskResourceManager.getParentTaskName(taskType, taskName);
+    TaskState taskState = _helixTaskResourceManager.getTaskState(parentTaskName);
+    if (taskState != null) {
+      throw new TaskAlreadyExistsException(
+          "Task [" + taskName + "] of type [" + taskType + "] is already created. Current state is " + taskState);
+    }
+    List<String> tableNameWithTypes = new ArrayList<>();
+    if (TableNameBuilder.getTableTypeFromTableName(tableName) == null) {
+      String offlineTableName = TableNameBuilder.OFFLINE.tableNameWithType(tableName);
+      if (_pinotHelixResourceManager.hasOfflineTable(offlineTableName)) {
+        tableNameWithTypes.add(offlineTableName);
+      }
+      String realtimeTableName = TableNameBuilder.REALTIME.tableNameWithType(tableName);
+      if (_pinotHelixResourceManager.hasRealtimeTable(realtimeTableName)) {
+        tableNameWithTypes.add(realtimeTableName);
+      }
+    } else {
+      if (_pinotHelixResourceManager.hasTable(tableName)) {
+        tableNameWithTypes.add(tableName);
+      }
+    }
+    if (tableNameWithTypes.isEmpty()) {
+      throw new TableNotFoundException("'tableName' " + tableName + " is not found");
+    }
+
+    PinotTaskGenerator taskGenerator = _taskGeneratorRegistry.getTaskGenerator(taskType);
+    // Generate each type of tasks
+    if (taskGenerator == null) {
+      throw new UnknownTaskTypeException(
+          "Task type: " + taskType + " is not registered, cannot enable it for table: " + tableName);
+    }
+    // responseMap holds the table to task name mapping.
+    Map<String, String> responseMap = new HashMap<>();
+    for (String tableNameWithType : tableNameWithTypes) {
+      TableConfig tableConfig = _pinotHelixResourceManager.getTableConfig(tableNameWithType);
+      LOGGER.info("Trying to create tasks of type: {}, table: {}", taskType, tableNameWithType);
+      List<PinotTaskConfig> pinotTaskConfigs = taskGenerator.generateTasks(tableConfig, taskConfigs);
+      if (pinotTaskConfigs.isEmpty()) {
+        LOGGER.warn("No ad-hoc task generated for task type: {}", taskType);
+        continue;
+      }
+      LOGGER.info("Submitting ad-hoc task for task type: {} with task configs: {}", taskType, pinotTaskConfigs);
+      _controllerMetrics.addMeteredTableValue(taskType, ControllerMeter.NUMBER_ADHOC_TASKS_SUBMITTED, 1);
+      responseMap.put(tableNameWithType,
+          _helixTaskResourceManager.submitTask(parentTaskName, pinotTaskConfigs, minionInstanceTag,
+              taskGenerator.getTaskTimeoutMs(), taskGenerator.getNumConcurrentTasksPerInstance()));
+    }
+    if (responseMap.isEmpty()) {
+      throw new NoTaskScheduledException("No task scheduled for 'tableName': " + tableName);
+    }
+    return responseMap;
+  }
+
+  private class ZkTableConfigChangeListener implements IZkChildListener {
+
+    @Override
+    public synchronized void handleChildChange(String path, List<String> tableNamesWithType) {
+      checkTableConfigChanges(tableNamesWithType);
+    }
+  }
+
+  private void checkTableConfigChanges(List<String> tableNamesWithType) {
+    LOGGER.info("Checking task config changes in table configs");
+    // NOTE: we avoided calling _leadControllerManager::isLeaderForTable here to skip tables the current
+    // controller is not leader for. Because _leadControllerManager updates its leadership states based
+    // on a ZK event, and that ZK event may come later than this method call, making current controller
+    // think it's not lead for certain tables, when it should be if the leadership states are fully updated.
+    if (_tableTaskSchedulerUpdaterMap.isEmpty()) {
+      // Initial setup
+      for (String tableNameWithType : tableNamesWithType) {
+        subscribeTableConfigChanges(tableNameWithType);
+      }
+    } else {
+      Set<String> existingTables = new HashSet<>(_tableTaskSchedulerUpdaterMap.keySet());
+      Set<String> tablesToAdd = new HashSet<>();
+      for (String tableNameWithType : tableNamesWithType) {
+        if (!existingTables.remove(tableNameWithType)) {
+          tablesToAdd.add(tableNameWithType);
+        }
+      }
+      for (String tableNameWithType : tablesToAdd) {
+        subscribeTableConfigChanges(tableNameWithType);
+      }
+      if (!existingTables.isEmpty()) {
+        LOGGER.info("Found tables to clean up cron task scheduler: {}", existingTables);
+        for (String tableNameWithType : existingTables) {
+          cleanUpCronTaskSchedulerForTable(tableNameWithType);
+        }
+      }
     }
   }
 
@@ -342,6 +441,13 @@ public class PinotTaskManager extends ControllerPeriodicTask<Void> {
    */
   public ClusterInfoAccessor getClusterInfoAccessor() {
     return _clusterInfoAccessor;
+  }
+
+  /**
+   * Returns the task generator registry.
+   */
+  public TaskGeneratorRegistry getTaskGeneratorRegistry() {
+    return _taskGeneratorRegistry;
   }
 
   /**

@@ -23,6 +23,7 @@ import Logo from '../components/SvgIcons/Logo';
 import { useForm } from 'react-hook-form';
 import PinotMethodUtils from '../utils/PinotMethodUtils';
 import app_state from '../app_state';
+import { AuthWorkflow } from 'Models';
 
 interface FormData {
   username: string;
@@ -77,8 +78,10 @@ const LoginPage = (props) => {
     if(isUserAuthenticated){
       setInvalidToken(false);
       props.setIsAuthenticated(true);
+      app_state.authWorkflow = AuthWorkflow.BASIC;
       app_state.authToken = authToken;
       props.history.push(app_state.queryConsoleOnlyView ? '/query' : '/');
+      app_state.username = data.username;
     } else {
       setInvalidToken(true);
     }

@@ -163,17 +163,26 @@ public class PinotSegmentRestletResource {
   @GET
   @Produces(MediaType.APPLICATION_JSON)
   @Path("/segments/{tableName}")
-  @ApiOperation(value = "List all segments", notes = "List all segments")
+  @ApiOperation(value = "List all segments. An optional 'excludeReplacedSegments' parameter is used to get the"
+      + " list of segments which has not yet been replaced (determined by segment lineage entries) and can be queried"
+      + " from the table. The value is false by default.",
+      // TODO: more and more filters can be added later on, like excludeErrorSegments, excludeConsumingSegments, etc.
+      notes = "List all segments")
   public List<Map<TableType, List<String>>> getSegments(
       @ApiParam(value = "Name of the table", required = true) @PathParam("tableName") String tableName,
-      @ApiParam(value = "OFFLINE|REALTIME") @QueryParam("type") String tableTypeStr) {
+      @ApiParam(value = "OFFLINE|REALTIME") @QueryParam("type") String tableTypeStr,
+      @ApiParam(value = "Whether to exclude replaced segments in the response, which have been replaced"
+          + " specified in the segment lineage entries and cannot be queried from the table")
+      @QueryParam("excludeReplacedSegments") String excludeReplacedSegments) {
     List<String> tableNamesWithType = ResourceUtils
         .getExistingTableNamesWithType(_pinotHelixResourceManager, tableName, Constants.validateTableType(tableTypeStr),
             LOGGER);
+    boolean shouldExcludeReplacedSegments = Boolean.parseBoolean(excludeReplacedSegments);
     List<Map<TableType, List<String>>> resultList = new ArrayList<>(tableNamesWithType.size());
     for (String tableNameWithType : tableNamesWithType) {
       TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableNameWithType);
-      List<String> segments = _pinotHelixResourceManager.getSegmentsFor(tableNameWithType);
+      List<String> segments =
+          _pinotHelixResourceManager.getSegmentsFor(tableNameWithType, shouldExcludeReplacedSegments);
       resultList.add(Collections.singletonMap(tableType, segments));
     }
     return resultList;
@@ -281,10 +290,17 @@ public class PinotSegmentRestletResource {
       @ApiParam(value = "Name of the table", required = true) @PathParam("tableName") String tableName,
       @ApiParam(value = "Name of the segment", required = true) @PathParam("segmentName") @Encoded String segmentName) {
     segmentName = URIUtils.decode(segmentName);
-    TableType tableType = SegmentName.isRealtimeSegmentName(segmentName) ? TableType.REALTIME : TableType.OFFLINE;
-    String tableNameWithType =
-        ResourceUtils.getExistingTableNamesWithType(_pinotHelixResourceManager, tableName, tableType, LOGGER).get(0);
-    Map<String, String> segmentMetadata = getSegmentMetadataInternal(tableNameWithType, segmentName);
+    Map<String, String> segmentMetadata = null;
+    if (TableNameBuilder.getTableTypeFromTableName(tableName) != null) {
+      segmentMetadata = getSegmentMetadataInternal(tableName, segmentName);
+    } else {
+      segmentMetadata = getSegmentMetadataInternal(TableNameBuilder.OFFLINE.tableNameWithType(tableName), segmentName);
+      if (segmentMetadata == null) {
+        segmentMetadata =
+            getSegmentMetadataInternal(TableNameBuilder.REALTIME.tableNameWithType(tableName), segmentName);
+      }
+    }
+
     if (segmentMetadata != null) {
       return segmentMetadata;
     } else {
@@ -562,12 +578,14 @@ public class PinotSegmentRestletResource {
   @ApiOperation(value = "Delete a segment", notes = "Delete a segment")
   public SuccessResponse deleteSegment(
       @ApiParam(value = "Name of the table", required = true) @PathParam("tableName") String tableName,
-      @ApiParam(value = "Name of the segment", required = true) @PathParam("segmentName") @Encoded String segmentName) {
+      @ApiParam(value = "Name of the segment", required = true) @PathParam("segmentName") @Encoded String segmentName,
+      @ApiParam(value = "Retention period for the deleted segments (e.g. 12h, 3d); Using 0d or -1d will instantly "
+          + "delete segments without retention") @QueryParam("retention") String retentionPeriod) {
     segmentName = URIUtils.decode(segmentName);
     TableType tableType = SegmentName.isRealtimeSegmentName(segmentName) ? TableType.REALTIME : TableType.OFFLINE;
     String tableNameWithType =
         ResourceUtils.getExistingTableNamesWithType(_pinotHelixResourceManager, tableName, tableType, LOGGER).get(0);
-    deleteSegmentsInternal(tableNameWithType, Collections.singletonList(segmentName));
+    deleteSegmentsInternal(tableNameWithType, Collections.singletonList(segmentName), retentionPeriod);
     return new SuccessResponse("Segment deleted");
   }
 
@@ -578,14 +596,17 @@ public class PinotSegmentRestletResource {
   @ApiOperation(value = "Delete all segments", notes = "Delete all segments")
   public SuccessResponse deleteAllSegments(
       @ApiParam(value = "Name of the table", required = true) @PathParam("tableName") String tableName,
-      @ApiParam(value = "OFFLINE|REALTIME", required = true) @QueryParam("type") String tableTypeStr) {
+      @ApiParam(value = "OFFLINE|REALTIME", required = true) @QueryParam("type") String tableTypeStr,
+      @ApiParam(value = "Retention period for the deleted segments (e.g. 12h, 3d); Using 0d or -1d will instantly "
+          + "delete segments without retention") @QueryParam("retention") String retentionPeriod) {
     TableType tableType = Constants.validateTableType(tableTypeStr);
     if (tableType == null) {
       throw new ControllerApplicationException(LOGGER, "Table type must not be null", Status.BAD_REQUEST);
     }
     String tableNameWithType =
         ResourceUtils.getExistingTableNamesWithType(_pinotHelixResourceManager, tableName, tableType, LOGGER).get(0);
-    deleteSegmentsInternal(tableNameWithType, _pinotHelixResourceManager.getSegmentsFor(tableNameWithType));
+    deleteSegmentsInternal(tableNameWithType, _pinotHelixResourceManager.getSegmentsFor(tableNameWithType, false),
+        retentionPeriod);
     return new SuccessResponse("All segments of table " + tableNameWithType + " deleted");
   }
 
@@ -598,6 +619,8 @@ public class PinotSegmentRestletResource {
       notes = "Delete the segments in the JSON array payload")
   public SuccessResponse deleteSegments(
       @ApiParam(value = "Name of the table", required = true) @PathParam("tableName") String tableName,
+      @ApiParam(value = "Retention period for the deleted segments (e.g. 12h, 3d); Using 0d or -1d will instantly "
+          + "delete segments without retention") @QueryParam("retention") String retentionPeriod,
       List<String> segments) {
     int numSegments = segments.size();
     if (numSegments == 0) {
@@ -613,7 +636,7 @@ public class PinotSegmentRestletResource {
     TableType tableType = isRealtimeSegment ? TableType.REALTIME : TableType.OFFLINE;
     String tableNameWithType =
         ResourceUtils.getExistingTableNamesWithType(_pinotHelixResourceManager, tableName, tableType, LOGGER).get(0);
-    deleteSegmentsInternal(tableNameWithType, segments);
+    deleteSegmentsInternal(tableNameWithType, segments, retentionPeriod);
     if (numSegments <= 5) {
       return new SuccessResponse("Deleted segments: " + segments + " from table: " + tableNameWithType);
     } else {
@@ -621,8 +644,9 @@ public class PinotSegmentRestletResource {
     }
   }
 
-  private void deleteSegmentsInternal(String tableNameWithType, List<String> segments) {
-    PinotResourceManagerResponse response = _pinotHelixResourceManager.deleteSegments(tableNameWithType, segments);
+  private void deleteSegmentsInternal(String tableNameWithType, List<String> segments, String retentionPeriod) {
+    PinotResourceManagerResponse response = _pinotHelixResourceManager.deleteSegments(tableNameWithType, segments,
+        retentionPeriod);
     if (!response.isSuccessful()) {
       throw new ControllerApplicationException(LOGGER,
           "Failed to delete segments from table: " + tableNameWithType + ", error message: " + response.getMessage(),

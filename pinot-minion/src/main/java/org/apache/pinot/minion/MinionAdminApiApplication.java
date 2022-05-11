@@ -45,10 +45,11 @@ import org.glassfish.jersey.server.ResourceConfig;
 public class MinionAdminApiApplication extends ResourceConfig {
   private static final String RESOURCE_PACKAGE = "org.apache.pinot.minion.api.resources";
   public static final String PINOT_CONFIGURATION = "pinotConfiguration";
+  public static final String MINION_INSTANCE_ID = "minionInstanceId";
 
   private HttpServer _httpServer;
 
-  public MinionAdminApiApplication(PinotConfiguration minionConf) {
+  public MinionAdminApiApplication(String instanceId, PinotConfiguration minionConf) {
     packages(RESOURCE_PACKAGE);
     property(PINOT_CONFIGURATION, minionConf);
 
@@ -56,6 +57,7 @@ public class MinionAdminApiApplication extends ResourceConfig {
       @Override
       protected void configure() {
         // TODO: Add bindings as needed in future.
+        bind(instanceId).named(MINION_INSTANCE_ID);
       }
     });
 
@@ -80,7 +82,7 @@ public class MinionAdminApiApplication extends ResourceConfig {
     BeanConfig beanConfig = new BeanConfig();
     beanConfig.setTitle("Pinot Minion API");
     beanConfig.setDescription("APIs for accessing Pinot Minion information");
-    beanConfig.setContact("https://github.com/apache/incubator-pinot");
+    beanConfig.setContact("https://github.com/apache/pinot");
     beanConfig.setVersion("1.0");
     beanConfig.setSchemes(new String[]{CommonConstants.HTTP_PROTOCOL, CommonConstants.HTTPS_PROTOCOL});
     beanConfig.setBasePath("/");
@@ -92,7 +94,7 @@ public class MinionAdminApiApplication extends ResourceConfig {
     _httpServer.getServerConfiguration().addHttpHandler(httpHandler, "/api/", "/help/");
 
     URL swaggerDistLocation =
-        MinionAdminApiApplication.class.getClassLoader().getResource("META-INF/resources/webjars/swagger-ui/3.18.2/");
+        MinionAdminApiApplication.class.getClassLoader().getResource("META-INF/resources/webjars/swagger-ui/3.23.11/");
     CLStaticHttpHandler swaggerDist = new CLStaticHttpHandler(new URLClassLoader(new URL[]{swaggerDistLocation}));
     _httpServer.getServerConfiguration().addHttpHandler(swaggerDist, "/swaggerui-dist/");
   }

@@ -30,9 +30,9 @@ import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import org.apache.pinot.segment.local.io.readerwriter.PinotDataBufferMemoryManager;
 import org.apache.pinot.segment.local.io.writer.impl.DirectMemoryManager;
 import org.apache.pinot.segment.local.utils.nativefst.builder.FSTSerializerImpl;
+import org.apache.pinot.segment.spi.memory.PinotDataBufferMemoryManager;
 
 
 /**
@@ -401,12 +401,14 @@ public abstract class FST implements Iterable<ByteBuffer> {
 
   public abstract boolean isArcLast(int arc);
 
-  public void save(FileOutputStream fileOutputStream) {
+  public int save(FileOutputStream fileOutputStream) {
     try {
       final byte[] fsaData =
           new FSTSerializerImpl().withNumbers().serialize(this, new ByteArrayOutputStream()).toByteArray();
 
       fileOutputStream.write(fsaData);
+
+      return fsaData.length;
     } catch (IOException e) {
       throw new RuntimeException(e.getMessage());
     }

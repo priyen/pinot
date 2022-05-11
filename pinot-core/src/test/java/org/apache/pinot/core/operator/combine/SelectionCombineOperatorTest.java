@@ -175,8 +175,8 @@ public class SelectionCombineOperatorTest {
     // Should early-terminate after processing the result of the first segment. Each thread should process at most 1
     // segment.
     long numDocsScanned = combineResult.getNumDocsScanned();
-    assertTrue(numDocsScanned >= NUM_RECORDS_PER_SEGMENT
-        && numDocsScanned <= CombineOperatorUtils.MAX_NUM_THREADS_PER_QUERY * NUM_RECORDS_PER_SEGMENT);
+    // Need to scan 10 documents per segment because 'intColumn' is sorted
+    assertTrue(numDocsScanned >= 10 && numDocsScanned <= CombineOperatorUtils.MAX_NUM_THREADS_PER_QUERY * 10);
     assertEquals(combineResult.getNumEntriesScannedInFilter(), 0);
     assertEquals(combineResult.getNumEntriesScannedPostFilter(), numDocsScanned);
     assertEquals(combineResult.getNumSegmentsProcessed(), NUM_SEGMENTS);
@@ -223,7 +223,7 @@ public class SelectionCombineOperatorTest {
   }
 
   private IntermediateResultsBlock getCombineResult(String query) {
-    QueryContext queryContext = QueryContextConverterUtils.getQueryContextFromSQL(query);
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
     List<PlanNode> planNodes = new ArrayList<>(NUM_SEGMENTS);
     for (IndexSegment indexSegment : _indexSegments) {
       planNodes.add(PLAN_MAKER.makeSegmentPlanNode(indexSegment, queryContext));

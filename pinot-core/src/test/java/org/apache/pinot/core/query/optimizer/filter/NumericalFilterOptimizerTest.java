@@ -18,19 +18,17 @@
  */
 package org.apache.pinot.core.query.optimizer.filter;
 
-import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.request.PinotQuery;
 import org.apache.pinot.core.query.optimizer.QueryOptimizer;
 import org.apache.pinot.spi.data.FieldSpec;
 import org.apache.pinot.spi.data.Schema;
-import org.apache.pinot.sql.parsers.CalciteSqlCompiler;
+import org.apache.pinot.sql.parsers.CalciteSqlParser;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
 
 public class NumericalFilterOptimizerTest {
   private static final QueryOptimizer OPTIMIZER = new QueryOptimizer();
-  private static final CalciteSqlCompiler SQL_COMPILER = new CalciteSqlCompiler();
   private static final Schema SCHEMA =
       new Schema.SchemaBuilder().setSchemaName("testTable").addSingleValueDimension("intColumn", FieldSpec.DataType.INT)
           .addSingleValueDimension("longColumn", FieldSpec.DataType.LONG)
@@ -47,6 +45,12 @@ public class NumericalFilterOptimizerTest {
     Assert.assertEquals(rewrite("SELECT * FROM testTable WHERE intColumn = 5.0"),
         "Expression(type:FUNCTION, functionCall:Function(operator:EQUALS, operands:[Expression(type:IDENTIFIER, "
             + "identifier:Identifier(name:intColumn)), Expression(type:LITERAL, literal:<Literal longValue:5>)]))");
+
+    // Test a query containing NOT operator
+    Assert.assertEquals(rewrite("SELECT * FROM testTable WHERE NOT intColumn = 5.0"),
+        "Expression(type:FUNCTION, functionCall:Function(operator:NOT, operands:[Expression(type:FUNCTION, "
+            + "functionCall:Function(operator:EQUALS, operands:[Expression(type:IDENTIFIER, identifier:Identifier"
+            + "(name:intColumn)), Expression(type:LITERAL, literal:<Literal longValue:5>)]))]))");
 
     // Test int column equals invalid decimal value.
     Assert.assertEquals(rewrite("SELECT * FROM testTable WHERE intColumn = 5.5"),
@@ -347,8 +351,7 @@ public class NumericalFilterOptimizerTest {
   }
 
   private static String rewrite(String query) {
-    BrokerRequest sqlBrokerRequest = SQL_COMPILER.compileToBrokerRequest(query);
-    PinotQuery pinotQuery = sqlBrokerRequest.getPinotQuery();
+    PinotQuery pinotQuery = CalciteSqlParser.compileToPinotQuery(query);
     OPTIMIZER.optimize(pinotQuery, SCHEMA);
     return pinotQuery.getFilterExpression().toString();
   }

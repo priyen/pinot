@@ -19,6 +19,7 @@
 package org.apache.pinot.controller.api.resources;
 
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.base.Preconditions;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
@@ -26,6 +27,8 @@ import io.swagger.annotations.ApiParam;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import javax.annotation.Nullable;
 import javax.inject.Inject;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
@@ -40,6 +43,7 @@ import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pinot.common.metrics.ControllerMeter;
 import org.apache.pinot.common.metrics.ControllerMetrics;
 import org.apache.pinot.controller.ControllerConf;
@@ -148,11 +152,18 @@ public class TableConfigsRestletResource {
   @Path("/tableConfigs")
   @ApiOperation(value = "Add the TableConfigs using the tableConfigsStr json",
       notes = "Add the TableConfigs using the tableConfigsStr json")
-  public SuccessResponse addConfig(String tableConfigsStr, @Context HttpHeaders httpHeaders, @Context Request request) {
+  public ConfigSuccessResponse addConfig(
+      String tableConfigsStr,
+      @ApiParam(value = "comma separated list of validation type(s) to skip. supported types: (ALL|TASK|UPSERT)")
+      @QueryParam("validationTypesToSkip") @Nullable String typesToSkip, @Context HttpHeaders httpHeaders,
+      @Context Request request) {
+    Pair<TableConfigs, Map<String, Object>> tableConfigsAndUnrecognizedProps;
     TableConfigs tableConfigs;
     try {
-      tableConfigs = JsonUtils.stringToObject(tableConfigsStr, TableConfigs.class);
-      validateConfig(tableConfigs);
+      tableConfigsAndUnrecognizedProps =
+          JsonUtils.stringToObjectAndUnrecognizedProperties(tableConfigsStr, TableConfigs.class);
+      tableConfigs = tableConfigsAndUnrecognizedProps.getLeft();
+      validateConfig(tableConfigs, typesToSkip);
     } catch (Exception e) {
       throw new ControllerApplicationException(LOGGER, String.format("Invalid TableConfigs. %s", e.getMessage()),
           Response.Status.BAD_REQUEST, e);
@@ -209,7 +220,8 @@ public class TableConfigsRestletResource {
         throw e;
       }
 
-      return new SuccessResponse("TableConfigs " + tableConfigs.getTableName() + " successfully added");
+      return new ConfigSuccessResponse("TableConfigs " + tableConfigs.getTableName() + " successfully added",
+          tableConfigsAndUnrecognizedProps.getRight());
     } catch (Exception e) {
       _controllerMetrics.addMeteredGlobalValue(ControllerMeter.CONTROLLER_TABLE_ADD_ERROR, 1L);
       if (e instanceof InvalidTableConfigException) {
@@ -275,18 +287,24 @@ public class TableConfigsRestletResource {
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Update the TableConfigs provided by the tableConfigsStr json",
       notes = "Update the TableConfigs provided by the tableConfigsStr json")
-  public SuccessResponse updateConfig(
+  public ConfigSuccessResponse updateConfig(
       @ApiParam(value = "TableConfigs name i.e. raw table name", required = true) @PathParam("tableName")
           String tableName,
+      @ApiParam(value = "comma separated list of validation type(s) to skip. supported types: (ALL|TASK|UPSERT)")
+      @QueryParam("validationTypesToSkip") @Nullable String typesToSkip,
       @ApiParam(value = "Reload the table if the new schema is backward compatible") @DefaultValue("false")
       @QueryParam("reload") boolean reload, String tableConfigsStr)
       throws Exception {
+    Pair<TableConfigs, Map<String, Object>> tableConfigsAndUnrecognizedProps;
     TableConfigs tableConfigs;
     try {
-      tableConfigs = JsonUtils.stringToObject(tableConfigsStr, TableConfigs.class);
+      tableConfigsAndUnrecognizedProps =
+          JsonUtils.stringToObjectAndUnrecognizedProperties(tableConfigsStr, TableConfigs.class);
+      tableConfigs = tableConfigsAndUnrecognizedProps.getLeft();
       Preconditions.checkState(tableConfigs.getTableName().equals(tableName),
           "'tableName' in TableConfigs: %s must match provided tableName: %s", tableConfigs.getTableName(), tableName);
-      validateConfig(tableConfigs);
+
+      validateConfig(tableConfigs, typesToSkip);
     } catch (Exception e) {
       throw new ControllerApplicationException(LOGGER, String.format("Invalid TableConfigs: %s", tableName),
           Response.Status.BAD_REQUEST, e);
@@ -338,7 +356,8 @@ public class TableConfigsRestletResource {
           Response.Status.INTERNAL_SERVER_ERROR, e);
     }
 
-    return new SuccessResponse("TableConfigs updated for " + tableName);
+    return new ConfigSuccessResponse("TableConfigs updated for " + tableName,
+        tableConfigsAndUnrecognizedProps.getRight());
   }
 
   /**
@@ -349,15 +368,23 @@ public class TableConfigsRestletResource {
   @Path("/tableConfigs/validate")
   @Produces(MediaType.APPLICATION_JSON)
   @ApiOperation(value = "Validate the TableConfigs", notes = "Validate the TableConfigs")
-  public String validateConfig(String tableConfigsStr) {
+  public String validateConfig(String tableConfigsStr,
+      @ApiParam(value = "comma separated list of validation type(s) to skip. supported types: (ALL|TASK|UPSERT)")
+      @QueryParam("validationTypesToSkip") @Nullable String typesToSkip) {
+    Pair<TableConfigs, Map<String, Object>> tableConfigsAndUnrecognizedProps;
     TableConfigs tableConfigs;
     try {
-      tableConfigs = JsonUtils.stringToObject(tableConfigsStr, TableConfigs.class);
+      tableConfigsAndUnrecognizedProps =
+          JsonUtils.stringToObjectAndUnrecognizedProperties(tableConfigsStr, TableConfigs.class);
+      tableConfigs = tableConfigsAndUnrecognizedProps.getLeft();
     } catch (IOException e) {
       throw new ControllerApplicationException(LOGGER,
           String.format("Invalid TableConfigs json string: %s", tableConfigsStr), Response.Status.BAD_REQUEST, e);
     }
-    return validateConfig(tableConfigs);
+    TableConfigs validatedTableConfigs = validateConfig(tableConfigs, typesToSkip);
+    ObjectNode response = JsonUtils.objectToJsonNode(validatedTableConfigs).deepCopy();
+    response.set("unrecognizedProperties", JsonUtils.objectToJsonNode(tableConfigsAndUnrecognizedProps.getRight()));
+    return response.toString();
   }
 
   private void tuneConfig(TableConfig tableConfig, Schema schema) {
@@ -366,7 +393,7 @@ public class TableConfigsRestletResource {
     TableConfigUtils.ensureStorageQuotaConstraints(tableConfig, _controllerConf.getDimTableMaxSize());
   }
 
-  private String validateConfig(TableConfigs tableConfigs) {
+  private TableConfigs validateConfig(TableConfigs tableConfigs, @Nullable String typesToSkip) {
     String rawTableName = tableConfigs.getTableName();
     TableConfig offlineTableConfig = tableConfigs.getOffline();
     TableConfig realtimeTableConfig = tableConfigs.getRealtime();
@@ -387,20 +414,20 @@ public class TableConfigsRestletResource {
         Preconditions.checkState(offlineRawTableName.equals(rawTableName),
             "Name in 'offline' table config: %s must be equal to 'tableName': %s", offlineRawTableName, rawTableName);
         TableConfigUtils.validateTableName(offlineTableConfig);
-        TableConfigUtils.validate(offlineTableConfig, schema);
+        TableConfigUtils.validate(offlineTableConfig, schema, typesToSkip, _controllerConf.isDisableIngestionGroovy());
       }
       if (realtimeTableConfig != null) {
         String realtimeRawTableName = TableNameBuilder.extractRawTableName(realtimeTableConfig.getTableName());
         Preconditions.checkState(realtimeRawTableName.equals(rawTableName),
             "Name in 'realtime' table config: %s must be equal to 'tableName': %s", realtimeRawTableName, rawTableName);
         TableConfigUtils.validateTableName(realtimeTableConfig);
-        TableConfigUtils.validate(realtimeTableConfig, schema);
+        TableConfigUtils.validate(realtimeTableConfig, schema, typesToSkip, _controllerConf.isDisableIngestionGroovy());
       }
       if (offlineTableConfig != null && realtimeTableConfig != null) {
         TableConfigUtils.verifyHybridTableConfigs(rawTableName, offlineTableConfig, realtimeTableConfig);
       }
 
-      return tableConfigs.toJsonString();
+      return tableConfigs;
     } catch (Exception e) {
       throw new ControllerApplicationException(LOGGER,
           String.format("Invalid TableConfigs: %s. %s", rawTableName, e.getMessage()), Response.Status.BAD_REQUEST, e);

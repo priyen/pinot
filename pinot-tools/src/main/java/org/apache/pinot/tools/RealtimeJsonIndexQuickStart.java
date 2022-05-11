@@ -32,11 +32,10 @@ import org.apache.pinot.spi.stream.StreamDataServerStartable;
 import org.apache.pinot.tools.Quickstart.Color;
 import org.apache.pinot.tools.admin.PinotAdministrator;
 import org.apache.pinot.tools.admin.command.QuickstartRunner;
-import org.apache.pinot.tools.streams.MeetupRsvpJsonStream;
+import org.apache.pinot.tools.streams.MeetupRsvpStream;
 import org.apache.pinot.tools.utils.KafkaStarterUtils;
 
 import static org.apache.pinot.tools.Quickstart.prettyPrintResponse;
-import static org.apache.pinot.tools.Quickstart.printStatus;
 
 
 public class RealtimeJsonIndexQuickStart extends QuickStartBase {
@@ -57,7 +56,7 @@ public class RealtimeJsonIndexQuickStart extends QuickStartBase {
 
   public void execute()
       throws Exception {
-    File quickstartTmpDir = new File(_tmpDir, String.valueOf(System.currentTimeMillis()));
+    File quickstartTmpDir = new File(_dataDir, String.valueOf(System.currentTimeMillis()));
     File baseDir = new File(quickstartTmpDir, "meetupRsvp");
     File dataDir = new File(baseDir, "data");
     Preconditions.checkState(dataDir.mkdirs());
@@ -74,7 +73,8 @@ public class RealtimeJsonIndexQuickStart extends QuickStartBase {
     FileUtils.copyURLToFile(resource, tableConfigFile);
 
     QuickstartTableRequest request = new QuickstartTableRequest(baseDir.getAbsolutePath());
-    QuickstartRunner runner = new QuickstartRunner(Lists.newArrayList(request), 1, 1, 1, dataDir);
+    QuickstartRunner runner =
+        new QuickstartRunner(Lists.newArrayList(request), 1, 1, 1, 0, dataDir, getConfigOverrides());
 
     printStatus(Color.CYAN, "***** Starting Kafka *****");
     ZkStarter.ZookeeperInstance zookeeperInstance = ZkStarter.startLocalZkServer();
@@ -87,7 +87,7 @@ public class RealtimeJsonIndexQuickStart extends QuickStartBase {
     _kafkaStarter.start();
     _kafkaStarter.createTopic("meetupRSVPEvents", KafkaStarterUtils.getTopicCreationProps(2));
     printStatus(Color.CYAN, "***** Starting meetup data stream and publishing to Kafka *****");
-    MeetupRsvpJsonStream meetupRSVPProvider = new MeetupRsvpJsonStream();
+    MeetupRsvpStream meetupRSVPProvider = new MeetupRsvpStream();
     meetupRSVPProvider.run();
     printStatus(Color.CYAN, "***** Starting Zookeeper, controller, server and broker *****");
     runner.startAll();

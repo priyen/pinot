@@ -18,8 +18,8 @@
  */
 package org.apache.pinot.segment.local.realtime.impl.dictionary;
 
-import org.apache.pinot.segment.local.io.readerwriter.PinotDataBufferMemoryManager;
-import org.apache.pinot.segment.spi.index.reader.MutableDictionary;
+import org.apache.pinot.segment.spi.index.mutable.MutableDictionary;
+import org.apache.pinot.segment.spi.memory.PinotDataBufferMemoryManager;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 
 
@@ -41,6 +41,9 @@ public class MutableDictionaryFactory {
           return new FloatOffHeapMutableDictionary(cardinality, maxOverflowSize, memoryManager, allocationContext);
         case DOUBLE:
           return new DoubleOffHeapMutableDictionary(cardinality, maxOverflowSize, memoryManager, allocationContext);
+        case BIG_DECIMAL:
+          return new BigDecimalOffHeapMutableDictionary(cardinality, maxOverflowSize, memoryManager, allocationContext,
+              avgLength);
         case STRING:
           return new StringOffHeapMutableDictionary(cardinality, maxOverflowSize, memoryManager, allocationContext,
               avgLength);
@@ -61,6 +64,8 @@ public class MutableDictionaryFactory {
           return new FloatOnHeapMutableDictionary();
         case DOUBLE:
           return new DoubleOnHeapMutableDictionary();
+        case BIG_DECIMAL:
+          return new BigDecimalOnHeapMutableDictionary();
         case STRING:
           return new StringOnHeapMutableDictionary();
         case BYTES:

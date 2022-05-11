@@ -32,7 +32,7 @@ public enum BrokerMeter implements AbstractMetrics.Meter {
   QUERIES("queries", false),
 
   // These metrics track the exceptions caught during query execution in broker side.
-  // PQL compile phase.
+  // Query compile phase.
   REQUEST_COMPILATION_EXCEPTIONS("exceptions", true),
   // Get resource phase.
   RESOURCE_MISSING_EXCEPTIONS("exceptions", true),
@@ -43,6 +43,7 @@ public enum BrokerMeter implements AbstractMetrics.Meter {
   // Scatter phase.
   NO_SERVER_FOUND_EXCEPTIONS("exceptions", false),
   REQUEST_TIMEOUT_BEFORE_SCATTERED_EXCEPTIONS("exceptions", false),
+  REQUEST_CHANNEL_LOCK_TIMEOUT_EXCEPTIONS("exceptions", false),
   REQUEST_SEND_EXCEPTIONS("exceptions", false),
   // Gather phase.
   RESPONSE_FETCH_EXCEPTIONS("exceptions", false),
@@ -68,23 +69,9 @@ public enum BrokerMeter implements AbstractMetrics.Meter {
 
   NUM_RESIZES("numResizes", false),
 
-  REQUEST_CONNECTION_TIMEOUTS("timeouts", false),
   HELIX_ZOOKEEPER_RECONNECTS("reconnects", true),
 
-  // This metric tracks the number of requests dropped by the broker after we get a connection to the server.
-  // Exceptions resulting when sending a request get counted in this metric. The metric is counted on a per-table
-  // basis.
-  REQUEST_DROPPED_DUE_TO_SEND_ERROR("requestDropped", false),
-
-  // This metric tracks the number of requests that had to be dropped because we could not get a connection
-  // to the server. Note that this may be because we have exhausted the (fixed-size) pool for the server, and
-  // also reached the maximum number of waiting requests for the server. The metric is counted on a per-table
-  // basis.
-  REQUEST_DROPPED_DUE_TO_CONNECTION_ERROR("requestDropped", false),
-
   REQUEST_DROPPED_DUE_TO_ACCESS_ERROR("requestsDropped", false),
-
-  ROUTING_TABLE_REBUILD_FAILURES("failures", false),
 
   GROUP_BY_SIZE("queries", false),
   TOTAL_SERVER_RESPONSE_SIZE("queries", false),

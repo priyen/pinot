@@ -24,6 +24,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import javax.annotation.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -61,14 +62,11 @@ public class Connection {
   }
 
   /**
-   * Creates a prepared statement, to escape a PQL query parameters.
+   * Creates a prepared statement, to escape query parameters.
    *
-   * Deprecated as we will soon be removing support for pql endpoint
-   *
-   * @param query The PQL query for which to create a prepared statement.
-   * @return A prepared statement for this connection.
+   * @param query The query for which to create a prepared statement
+   * @return A prepared statement for this connection
    */
-  @Deprecated
   public PreparedStatement prepareStatement(String query) {
     return new PreparedStatement(this, query);
   }
@@ -79,22 +77,20 @@ public class Connection {
    * @param request The request for which to create a prepared statement.
    * @return A prepared statement for this connection.
    */
+  @Deprecated
   public PreparedStatement prepareStatement(Request request) {
     return new PreparedStatement(this, request);
   }
 
   /**
-   * Executes a PQL query.
+   * Executes a query.
    *
-   * Deprecated as we will soon be removing support for pql endpoint
    * @param query The query to execute
    * @return The result of the query
    * @throws PinotClientException If an exception occurs while processing the query
    */
-  @Deprecated
-  public ResultSetGroup execute(String query)
-      throws PinotClientException {
-    return execute(null, new Request("pql", query));
+  public ResultSetGroup execute(String query) {
+    return execute(null, query);
   }
 
   /**
@@ -103,40 +99,27 @@ public class Connection {
    * @return The result of the query
    * @throws PinotClientException If an exception occurs while processing the query
    */
+  @Deprecated
   public ResultSetGroup execute(Request request)
       throws PinotClientException {
     return execute(null, request);
   }
 
   /**
-   * Executes a PQL query.
+   * Executes a query.
    *
-   * Deprecated as we will soon be removing support for pql endpoint
+   * @param tableName Name of the table to execute the query on
    * @param query The query to execute
    * @return The result of the query
    * @throws PinotClientException If an exception occurs while processing the query
    */
-  @Deprecated
-  public ResultSetGroup execute(String tableName, String query)
-      throws PinotClientException {
-    return execute(tableName, new Request("pql", query));
-  }
-
-  /**
-   * Executes a Pinot Request.
-   *
-   * @param request The request to execute
-   * @return The result of the query
-   * @throws PinotClientException If an exception occurs while processing the query
-   */
-  public ResultSetGroup execute(String tableName, Request request)
+  public ResultSetGroup execute(@Nullable String tableName, String query)
       throws PinotClientException {
     String brokerHostPort = _brokerSelector.selectBroker(tableName);
     if (brokerHostPort == null) {
-      throw new PinotClientException(
-          "Could not find broker to query for table: " + (tableName == null ? "null" : tableName));
+      throw new PinotClientException("Could not find broker to query for table: " + tableName);
     }
-    BrokerResponse response = _transport.executeQuery(brokerHostPort, request);
+    BrokerResponse response = _transport.executeQuery(brokerHostPort, query);
     if (response.hasExceptions() && _failOnExceptions) {
       throw new PinotClientException("Query had processing exceptions: \n" + response.getExceptions());
     }
@@ -144,18 +127,32 @@ public class Connection {
   }
 
   /**
-   * Executes a PQL query asynchronously.
+   * Executes a Pinot Request.
    *
-   * Deprecated as we will soon be removing support for pql endpoint
+   * @param request The request to execute
+   * @return The result of the query
+   * @throws PinotClientException If an exception occurs while processing the query
+   */
+  @Deprecated
+  public ResultSetGroup execute(@Nullable String tableName, Request request)
+      throws PinotClientException {
+    return execute(tableName, request.getQuery());
+  }
+
+  /**
+   * Executes a query asynchronously.
    *
    * @param query The query to execute
    * @return A future containing the result of the query
    * @throws PinotClientException If an exception occurs while processing the query
    */
-  @Deprecated
   public Future<ResultSetGroup> executeAsync(String query)
       throws PinotClientException {
-    return executeAsync(new Request("pql", query));
+    String brokerHostPort = _brokerSelector.selectBroker(null);
+    if (brokerHostPort == null) {
+      throw new PinotClientException("Could not find broker to query for statement: " + query);
+    }
+    return new ResultSetGroupFuture(_transport.executeQueryAsync(brokerHostPort, query));
   }
 
   /**
@@ -165,16 +162,10 @@ public class Connection {
    * @return A future containing the result of the query
    * @throws PinotClientException If an exception occurs while processing the query
    */
+  @Deprecated
   public Future<ResultSetGroup> executeAsync(Request request)
       throws PinotClientException {
-    String brokerHostPort = _brokerSelector.selectBroker(null);
-    if (brokerHostPort == null) {
-      throw new PinotClientException(
-          "Could not find broker to query for statement: " + (request.getQuery() == null ? "null"
-              : request.getQuery()));
-    }
-    final Future<BrokerResponse> responseFuture = _transport.executeQueryAsync(brokerHostPort, request);
-    return new ResultSetGroupFuture(responseFuture);
+    return executeAsync(request.getQuery());
   }
 
   /**
@@ -223,7 +214,7 @@ public class Connection {
     public ResultSetGroup get()
         throws InterruptedException, ExecutionException {
       try {
-        return get(1000L, TimeUnit.DAYS);
+        return get(60000L, TimeUnit.MILLISECONDS);
       } catch (TimeoutException e) {
         throw new ExecutionException(e);
       }

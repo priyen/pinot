@@ -19,8 +19,10 @@
 package org.apache.pinot.segment.spi.index.reader;
 
 import java.io.Closeable;
+import java.math.BigDecimal;
 import javax.annotation.Nullable;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
+import org.apache.pinot.spi.utils.BigDecimalUtils;
 
 
 /**
@@ -103,6 +105,233 @@ public interface ForwardIndexReader<T extends ForwardIndexReaderContext> extends
    */
 
   /**
+   * Fills the values
+   * @param docIds Array containing the document ids to read
+   * @param length Number of values to read
+   * @param values Values to fill
+   * @param context Reader context
+   */
+  default void readValuesSV(int[] docIds, int length, int[] values, T context) {
+    switch (getValueType()) {
+      case INT:
+        for (int i = 0; i < length; i++) {
+          values[i] = getInt(docIds[i], context);
+        }
+        break;
+      case LONG:
+        for (int i = 0; i < length; i++) {
+          values[i] = (int) getLong(docIds[i], context);
+        }
+        break;
+      case FLOAT:
+        for (int i = 0; i < length; i++) {
+          values[i] = (int) getFloat(docIds[i], context);
+        }
+        break;
+      case DOUBLE:
+        for (int i = 0; i < length; i++) {
+          values[i] = (int) getDouble(docIds[i], context);
+        }
+        break;
+      case BIG_DECIMAL:
+        for (int i = 0; i < length; i++) {
+          values[i] = getBigDecimal(docIds[i], context).intValue();
+        }
+        break;
+      case STRING:
+        for (int i = 0; i < length; i++) {
+          values[i] = Integer.parseInt(getString(docIds[i], context));
+        }
+        break;
+      default:
+        throw new IllegalArgumentException();
+    }
+  }
+
+  /**
+   * Fills the values
+   * @param docIds Array containing the document ids to read
+   * @param length Number of values to read
+   * @param values Values to fill
+   * @param context Reader context
+   */
+  default void readValuesSV(int[] docIds, int length, long[] values, T context) {
+    switch (getValueType()) {
+      case INT:
+        for (int i = 0; i < length; i++) {
+          values[i] = getInt(docIds[i], context);
+        }
+        break;
+      case LONG:
+        for (int i = 0; i < length; i++) {
+          values[i] = getLong(docIds[i], context);
+        }
+        break;
+      case FLOAT:
+        for (int i = 0; i < length; i++) {
+          values[i] = (long) getFloat(docIds[i], context);
+        }
+        break;
+      case DOUBLE:
+        for (int i = 0; i < length; i++) {
+          values[i] = (long) getDouble(docIds[i], context);
+        }
+        break;
+      case BIG_DECIMAL:
+        for (int i = 0; i < length; i++) {
+          values[i] = getBigDecimal(docIds[i], context).longValue();
+        }
+        break;
+      case STRING:
+        for (int i = 0; i < length; i++) {
+          values[i] = Long.parseLong(getString(docIds[i], context));
+        }
+        break;
+      default:
+        throw new IllegalArgumentException();
+    }
+  }
+
+  /**
+   * Fills the values
+   * @param docIds Array containing the document ids to read
+   * @param length Number of values to read
+   * @param values Values to fill
+   * @param context Reader context
+   */
+  default void readValuesSV(int[] docIds, int length, float[] values, T context) {
+    switch (getValueType()) {
+      case INT:
+        for (int i = 0; i < length; i++) {
+          values[i] = getInt(docIds[i], context);
+        }
+        break;
+      case LONG:
+        for (int i = 0; i < length; i++) {
+          values[i] = getLong(docIds[i], context);
+        }
+        break;
+      case FLOAT:
+        for (int i = 0; i < length; i++) {
+          values[i] = getFloat(docIds[i], context);
+        }
+        break;
+      case DOUBLE:
+        for (int i = 0; i < length; i++) {
+          values[i] = (float) getDouble(docIds[i], context);
+        }
+        break;
+      case BIG_DECIMAL:
+        for (int i = 0; i < length; i++) {
+          values[i] = getBigDecimal(docIds[i], context).floatValue();
+        }
+        break;
+      case STRING:
+        for (int i = 0; i < length; i++) {
+          values[i] = Float.parseFloat(getString(docIds[i], context));
+        }
+        break;
+      default:
+        throw new IllegalArgumentException();
+    }
+  }
+
+  /**
+   * Fills the values
+   * @param docIds Array containing the document ids to read
+   * @param length Number of values to read
+   * @param values Values to fill
+   * @param context Reader context
+   */
+  default void readValuesSV(int[] docIds, int length, double[] values, T context) {
+    switch (getValueType()) {
+      case INT:
+        for (int i = 0; i < length; i++) {
+          values[i] = getInt(docIds[i], context);
+        }
+        break;
+      case LONG:
+        for (int i = 0; i < length; i++) {
+          values[i] = getLong(docIds[i], context);
+        }
+        break;
+      case FLOAT:
+        for (int i = 0; i < length; i++) {
+          values[i] = getFloat(docIds[i], context);
+        }
+        break;
+      case DOUBLE:
+        for (int i = 0; i < length; i++) {
+          values[i] = getDouble(docIds[i], context);
+        }
+        break;
+      case BIG_DECIMAL:
+        for (int i = 0; i < length; i++) {
+          values[i] = getBigDecimal(docIds[i], context).doubleValue();
+        }
+        break;
+      case STRING:
+        for (int i = 0; i < length; i++) {
+          values[i] = Double.parseDouble(getString(docIds[i], context));
+        }
+        break;
+      default:
+        throw new IllegalArgumentException();
+    }
+  }
+
+  /**
+   * Fills the values
+   * @param docIds Array containing the document ids to read
+   * @param length Number of values to read
+   * @param values Values to fill
+   * @param context Reader context
+   */
+  default void readValuesSV(int[] docIds, int length, BigDecimal[] values, T context) {
+    // todo(nhejazi): add raw index support to the BIG_DECIMAL type. In most of the cases, it will be more efficient
+    //  to store big decimal as raw.
+    switch (getValueType()) {
+      case INT:
+        for (int i = 0; i < length; i++) {
+          values[i] = BigDecimal.valueOf(getInt(docIds[i], context));
+        }
+        break;
+      case LONG:
+        for (int i = 0; i < length; i++) {
+          values[i] = BigDecimal.valueOf(getLong(docIds[i], context));
+        }
+        break;
+      case FLOAT:
+        for (int i = 0; i < length; i++) {
+          values[i] = BigDecimal.valueOf(getFloat(docIds[i], context));
+        }
+        break;
+      case DOUBLE:
+        for (int i = 0; i < length; i++) {
+          values[i] = BigDecimal.valueOf(getDouble(docIds[i], context));
+        }
+        break;
+      case STRING:
+        for (int i = 0; i < length; i++) {
+          values[i] = new BigDecimal(getString(docIds[i], context));
+        }
+        break;
+      case BIG_DECIMAL:
+        for (int i = 0; i < length; i++) {
+          values[i] = getBigDecimal(docIds[i], context);
+        }
+        break;
+      case BYTES:
+        for (int i = 0; i < length; i++) {
+          values[i] = BigDecimalUtils.deserialize(getBytes(docIds[i], context));
+        }
+        break;
+      default:
+        throw new IllegalArgumentException();
+    }
+  }
+
+  /**
    * Reads the INT value at the given document id.
    *
    * @param docId Document id
@@ -143,6 +372,17 @@ public interface ForwardIndexReader<T extends ForwardIndexReaderContext> extends
    * @return DOUBLE type single-value at the given document id
    */
   default double getDouble(int docId, T context) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Reads the BIG_DECIMAL type single-value at the given document id.
+   *
+   * @param docId Document id
+   * @param context Reader context
+   * @return BIG_DECIMAL type single-value at the given document id
+   */
+  default BigDecimal getBigDecimal(int docId, T context) {
     throw new UnsupportedOperationException();
   }
 
@@ -256,5 +496,4 @@ public interface ForwardIndexReader<T extends ForwardIndexReaderContext> extends
   default int getBytesMV(int docId, byte[][] valueBuffer, T context) {
     throw new UnsupportedOperationException();
   }
-
 }

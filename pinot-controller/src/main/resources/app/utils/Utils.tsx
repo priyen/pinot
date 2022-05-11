@@ -18,7 +18,10 @@
  * under the License.
  */
 
+import React from 'react';
+import ReactDiffViewer, {DiffMethod} from 'react-diff-viewer';
 import _ from 'lodash';
+import app_state from '../app_state';
 
 const sortArray = function (sortingArr, keyName, ascendingFlag) {
   if (ascendingFlag) {
@@ -51,7 +54,7 @@ const tableFormat = (data) => {
   rows.forEach((singleRow) => {
     const obj = {};
     singleRow.forEach((val: any, index: number) => {
-      obj[header[index]] = val;
+      obj[header[index]+app_state.columnNameSeparator+index] = val;
     });
     results.push(obj);
   });
@@ -66,14 +69,44 @@ const getSegmentStatus = (idealStateObj, externalViewObj) => {
   const externalSegmentCount = externalSegmentKeys.length;
 
   if (idealSegmentCount !== externalSegmentCount) {
-    return 'Bad';
+    let segmentStatusComponent = (
+        <ReactDiffViewer
+            oldValue={JSON.stringify(idealStateObj, null, 2)}
+            newValue={JSON.stringify(externalViewObj, null, 2)}
+            splitView={true}
+            showDiffOnly={true}
+            leftTitle={"Ideal State"}
+            rightTitle={"External View"}
+            compareMethod={DiffMethod.WORDS}
+        />
+    )
+    return {
+      value: 'Bad',
+      tooltip: `Ideal Segment Count: ${idealSegmentCount} does not match external Segment Count: ${externalSegmentCount}`,
+      component: segmentStatusComponent,
+    };
   }
 
-  let segmentStatus = 'Good';
+  let segmentStatus = {value: 'Good', tooltip: null, component: null};
   idealSegmentKeys.map((segmentKey) => {
-    if (segmentStatus === 'Good') {
+    if (segmentStatus.value === 'Good') {
       if (!_.isEqual(idealStateObj[segmentKey], externalViewObj[segmentKey])) {
-        segmentStatus = 'Bad';
+        let segmentStatusComponent = (
+            <ReactDiffViewer
+                oldValue={JSON.stringify(idealStateObj, null, 2)}
+                newValue={JSON.stringify(externalViewObj, null, 2)}
+                splitView={true}
+                showDiffOnly={true}
+                leftTitle={"Ideal State"}
+                rightTitle={"External View"}
+                compareMethod={DiffMethod.WORDS}
+            />
+        )
+        segmentStatus = {
+          value: 'Bad',
+          tooltip: "Ideal Status does not match external status",
+          component: segmentStatusComponent
+        };
       }
     }
   });
@@ -291,6 +324,18 @@ const encodeString = (str: string) => {
   return str;
 }
 
+const formatBytes = (bytes, decimals = 2) => {
+  if (bytes === 0) return '0 Bytes';
+
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
+
 export default {
   sortArray,
   tableFormat,
@@ -300,5 +345,6 @@ export default {
   serialize,
   navigateToPreviousPage,
   syncTableSchemaData,
-  encodeString
+  encodeString,
+  formatBytes
 };

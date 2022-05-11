@@ -65,14 +65,12 @@ public class BitSlicedIndexCreatorTest {
 
   @Test(expectedExceptions = IllegalArgumentException.class)
   public void testFailToCreateRawString() {
-    new BitSlicedRangeIndexCreator(INDEX_DIR, new ColumnMetadataImpl.Builder()
-        .setFieldSpec(new DimensionFieldSpec("foo", STRING, true)).build());
+    new BitSlicedRangeIndexCreator(INDEX_DIR, new DimensionFieldSpec("foo", STRING, true), null, null);
   }
 
   @Test(expectedExceptions = IllegalArgumentException.class)
   public void testFailToCreateMV() {
-    new BitSlicedRangeIndexCreator(INDEX_DIR, new ColumnMetadataImpl.Builder()
-        .setFieldSpec(new DimensionFieldSpec("foo", INT, false)).build());
+    new BitSlicedRangeIndexCreator(INDEX_DIR, new DimensionFieldSpec("foo", INT, false), 0, 10);
   }
 
   @Test
@@ -153,7 +151,7 @@ public class BitSlicedIndexCreatorTest {
   private void testInt(Dataset<int[]> dataset)
       throws IOException {
     ColumnMetadata metadata = dataset.toColumnMetadata();
-    try (BitSlicedRangeIndexCreator creator = new BitSlicedRangeIndexCreator(INDEX_DIR, metadata)) {
+    try (BitSlicedRangeIndexCreator creator = newBitSlicedIndexCreator(metadata)) {
       for (int value : dataset.values()) {
         creator.add(value);
       }
@@ -166,7 +164,9 @@ public class BitSlicedIndexCreatorTest {
       for (int quantile : dataset.quantiles()) {
         ImmutableRoaringBitmap reference = dataset.scan(prev, quantile);
         ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev, quantile);
+        int resultCount = reader.getNumMatchingDocs(prev, quantile);
         assertEquals(result, reference);
+        assertEquals(resultCount, result == null ? 0 : result.getCardinality());
         prev = quantile;
       }
       ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev + 1, Integer.MAX_VALUE);
@@ -181,7 +181,7 @@ public class BitSlicedIndexCreatorTest {
   private void testLong(Dataset<long[]> dataset)
       throws IOException {
     ColumnMetadata metadata = dataset.toColumnMetadata();
-    try (BitSlicedRangeIndexCreator creator = new BitSlicedRangeIndexCreator(INDEX_DIR, metadata)) {
+    try (BitSlicedRangeIndexCreator creator = newBitSlicedIndexCreator(metadata)) {
       for (long value : dataset.values()) {
         creator.add(value);
       }
@@ -194,7 +194,9 @@ public class BitSlicedIndexCreatorTest {
       for (long quantile : dataset.quantiles()) {
         ImmutableRoaringBitmap reference = dataset.scan(prev, quantile);
         ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev, quantile);
+        int resultCount = reader.getNumMatchingDocs(prev, quantile);
         assertEquals(result, reference);
+        assertEquals(resultCount, result == null ? 0 : result.getCardinality());
         prev = quantile;
       }
       ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev + 1, Long.MAX_VALUE);
@@ -209,7 +211,7 @@ public class BitSlicedIndexCreatorTest {
   private void testFloat(Dataset<float[]> dataset)
       throws IOException {
     ColumnMetadata metadata = dataset.toColumnMetadata();
-    try (BitSlicedRangeIndexCreator creator = new BitSlicedRangeIndexCreator(INDEX_DIR, metadata)) {
+    try (BitSlicedRangeIndexCreator creator = newBitSlicedIndexCreator(metadata)) {
       for (float value : dataset.values()) {
         creator.add(value);
       }
@@ -222,7 +224,9 @@ public class BitSlicedIndexCreatorTest {
       for (float quantile : dataset.quantiles()) {
         ImmutableRoaringBitmap reference = dataset.scan(prev, quantile);
         ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev, quantile);
+        int resultCount = reader.getNumMatchingDocs(prev, quantile);
         assertEquals(result, reference);
+        assertEquals(resultCount, result == null ? 0 : result.getCardinality());
         prev = quantile;
       }
       ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev + 1, Float.POSITIVE_INFINITY);
@@ -237,7 +241,7 @@ public class BitSlicedIndexCreatorTest {
   private void testDouble(Dataset<double[]> dataset)
       throws IOException {
     ColumnMetadata metadata = dataset.toColumnMetadata();
-    try (BitSlicedRangeIndexCreator creator = new BitSlicedRangeIndexCreator(INDEX_DIR, metadata)) {
+    try (BitSlicedRangeIndexCreator creator = newBitSlicedIndexCreator(metadata)) {
       for (double value : dataset.values()) {
         creator.add(value);
       }
@@ -250,7 +254,9 @@ public class BitSlicedIndexCreatorTest {
       for (double quantile : dataset.quantiles()) {
         ImmutableRoaringBitmap reference = dataset.scan(prev, quantile);
         ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev, quantile);
+        int resultCount = reader.getNumMatchingDocs(prev, quantile);
         assertEquals(result, reference);
+        assertEquals(resultCount, result == null ? 0 : result.getCardinality());
         prev = quantile;
       }
       ImmutableRoaringBitmap result = reader.getMatchingDocIds(prev + 1, Double.POSITIVE_INFINITY);
@@ -260,6 +266,12 @@ public class BitSlicedIndexCreatorTest {
     } finally {
       FileUtils.forceDelete(rangeIndexFile);
     }
+  }
+
+  private static BitSlicedRangeIndexCreator newBitSlicedIndexCreator(ColumnMetadata metadata) {
+    return metadata.hasDictionary() ? new BitSlicedRangeIndexCreator(INDEX_DIR,
+        metadata.getFieldSpec(), metadata.getCardinality()) : new BitSlicedRangeIndexCreator(INDEX_DIR,
+        metadata.getFieldSpec(), metadata.getMinValue(), metadata.getMaxValue());
   }
 
   enum Distribution {

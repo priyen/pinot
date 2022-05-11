@@ -45,6 +45,7 @@ public class V1Constants {
     public static final String BITMAP_RANGE_INDEX_FILE_EXTENSION = ".bitmap.range";
     public static final String FST_INDEX_FILE_EXTENSION = ".lucene.fst";
     public static final String JSON_INDEX_FILE_EXTENSION = ".json.idx";
+    public static final String NATIVE_TEXT_INDEX_FILE_EXTENSION = ".nativetext.idx";
     public static final String H3_INDEX_FILE_EXTENSION = ".h3.idx";
     public static final String BLOOM_FILTER_FILE_EXTENSION = ".bloom";
     public static final String NULLVALUE_VECTOR_FILE_EXTENSION = ".bitmap.nullvalue";
@@ -95,6 +96,7 @@ public class V1Constants {
       public static final String MIN_VALUE = "minValue";
       public static final String MAX_VALUE = "maxValue";
       public static final String PARTITION_FUNCTION = "partitionFunction";
+      public static final String PARTITION_FUNCTION_CONFIG = "partitionFunctionConfig";
       public static final String NUM_PARTITIONS = "numPartitions";
       public static final String PARTITION_VALUES = "partitionValues";
       public static final String DATETIME_FORMAT = "datetimeFormat";

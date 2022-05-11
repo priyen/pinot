@@ -37,7 +37,6 @@ import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.filesystem.PinotFSFactory;
 import org.apache.pinot.spi.ingestion.batch.IngestionJobLauncher;
 import org.apache.pinot.spi.ingestion.batch.spec.SegmentGenerationJobSpec;
-import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.JsonUtils;
 import org.apache.pinot.tools.BootstrapTableTool;
 import org.apache.pinot.tools.QuickstartTableRequest;
@@ -75,14 +74,25 @@ public class QuickstartRunner {
   private final boolean _enableTenantIsolation;
   private final String _authToken;
   private final Map<String, Object> _configOverrides;
+  private final boolean _deleteExistingData;
+
+  // If this field is non-null, an embedded Zookeeper instance will not be launched
+  private final String _zkExternalAddress;
 
   private final List<Integer> _controllerPorts = new ArrayList<>();
   private final List<Integer> _brokerPorts = new ArrayList<>();
   private boolean _isStopped = false;
 
   public QuickstartRunner(List<QuickstartTableRequest> tableRequests, int numControllers, int numBrokers,
+      int numServers, int numMinions, File tempDir, Map<String, Object> configOverrides)
+      throws Exception {
+    this(tableRequests, numControllers, numBrokers, numServers, numMinions, tempDir, true, null, configOverrides, null,
+        true);
+  }
+
+  public QuickstartRunner(List<QuickstartTableRequest> tableRequests, int numControllers, int numBrokers,
       int numServers, int numMinions, File tempDir, boolean enableIsolation, String authToken,
-      Map<String, Object> configOverrides)
+      Map<String, Object> configOverrides, String zkExternalAddress, boolean deleteExistingData)
       throws Exception {
     _tableRequests = tableRequests;
     _numControllers = numControllers;
@@ -93,13 +103,11 @@ public class QuickstartRunner {
     _enableTenantIsolation = enableIsolation;
     _authToken = authToken;
     _configOverrides = configOverrides;
-    clean();
-  }
-
-  public QuickstartRunner(List<QuickstartTableRequest> tableRequests, int numControllers, int numBrokers,
-      int numServers, File tempDir)
-      throws Exception {
-    this(tableRequests, numControllers, numBrokers, numServers, 0, tempDir, true, null, null);
+    _zkExternalAddress = zkExternalAddress;
+    _deleteExistingData = deleteExistingData;
+    if (deleteExistingData) {
+      clean();
+    }
   }
 
   private void startZookeeper()
@@ -114,11 +122,14 @@ public class QuickstartRunner {
       throws Exception {
     for (int i = 0; i < _numControllers; i++) {
       StartControllerCommand controllerStarter = new StartControllerCommand();
-      controllerStarter.setControllerPort(String.valueOf(DEFAULT_CONTROLLER_PORT + i)).setZkAddress(ZK_ADDRESS)
-          .setClusterName(CLUSTER_NAME).setTenantIsolation(_enableTenantIsolation)
+      controllerStarter.setControllerPort(String.valueOf(DEFAULT_CONTROLLER_PORT + i))
+          .setZkAddress(_zkExternalAddress != null ? _zkExternalAddress : ZK_ADDRESS).setClusterName(CLUSTER_NAME)
+          .setTenantIsolation(_enableTenantIsolation)
           .setDataDir(new File(_tempDir, DEFAULT_CONTROLLER_DIR + i).getAbsolutePath())
           .setConfigOverrides(_configOverrides);
-      controllerStarter.execute();
+      if (!controllerStarter.execute()) {
+        throw new RuntimeException("Failed to start Controller");
+      }
       _controllerPorts.add(DEFAULT_CONTROLLER_PORT + i);
     }
   }
@@ -127,9 +138,12 @@ public class QuickstartRunner {
       throws Exception {
     for (int i = 0; i < _numBrokers; i++) {
       StartBrokerCommand brokerStarter = new StartBrokerCommand();
-      brokerStarter.setPort(DEFAULT_BROKER_PORT + i).setZkAddress(ZK_ADDRESS).setClusterName(CLUSTER_NAME)
+      brokerStarter.setPort(DEFAULT_BROKER_PORT + i)
+          .setZkAddress(_zkExternalAddress != null ? _zkExternalAddress : ZK_ADDRESS).setClusterName(CLUSTER_NAME)
           .setConfigOverrides(_configOverrides);
-      brokerStarter.execute();
+      if (!brokerStarter.execute()) {
+        throw new RuntimeException("Failed to start Broker");
+      }
       _brokerPorts.add(DEFAULT_BROKER_PORT + i);
     }
   }
@@ -139,11 +153,13 @@ public class QuickstartRunner {
     for (int i = 0; i < _numServers; i++) {
       StartServerCommand serverStarter = new StartServerCommand();
       serverStarter.setPort(DEFAULT_SERVER_NETTY_PORT + i).setAdminPort(DEFAULT_SERVER_ADMIN_API_PORT + i)
-          .setZkAddress(ZK_ADDRESS).setClusterName(CLUSTER_NAME)
+          .setZkAddress(_zkExternalAddress != null ? _zkExternalAddress : ZK_ADDRESS).setClusterName(CLUSTER_NAME)
           .setDataDir(new File(_tempDir, DEFAULT_SERVER_DATA_DIR + i).getAbsolutePath())
           .setSegmentDir(new File(_tempDir, DEFAULT_SERVER_SEGMENT_DIR + i).getAbsolutePath())
           .setConfigOverrides(_configOverrides);
-      serverStarter.execute();
+      if (!serverStarter.execute()) {
+        throw new RuntimeException("Failed to start Server");
+      }
     }
   }
 
@@ -151,9 +167,12 @@ public class QuickstartRunner {
       throws Exception {
     for (int i = 0; i < _numMinions; i++) {
       StartMinionCommand minionStarter = new StartMinionCommand();
-      minionStarter.setMinionPort(DEFAULT_MINION_PORT + i).setZkAddress(ZK_ADDRESS).setClusterName(CLUSTER_NAME)
+      minionStarter.setMinionPort(DEFAULT_MINION_PORT + i)
+          .setZkAddress(_zkExternalAddress != null ? _zkExternalAddress : ZK_ADDRESS).setClusterName(CLUSTER_NAME)
           .setConfigOverrides(_configOverrides);
-      minionStarter.execute();
+      if (!minionStarter.execute()) {
+        throw new RuntimeException("Failed to start Minion");
+      }
     }
   }
 
@@ -165,7 +184,9 @@ public class QuickstartRunner {
   public void startAll()
       throws Exception {
     registerDefaultPinotFS();
-    startZookeeper();
+    if (_zkExternalAddress == null) {
+      startZookeeper();
+    }
     startControllers();
     startBrokers();
     startServers();
@@ -180,10 +201,13 @@ public class QuickstartRunner {
 
     // TODO: Stop Minion
     StopProcessCommand stopper = new StopProcessCommand(false);
-    stopper.stopController().stopBroker().stopServer().stopZookeeper();
+    if (_zkExternalAddress == null) {
+      stopper.stopController().stopBroker().stopServer().stopZookeeper();
+    }
     stopper.execute();
-    clean();
-
+    if (_deleteExistingData) {
+      clean();
+    }
     _isStopped = true;
   }
 
@@ -248,8 +272,9 @@ public class QuickstartRunner {
   public JsonNode runQuery(String query)
       throws Exception {
     int brokerPort = _brokerPorts.get(RANDOM.nextInt(_brokerPorts.size()));
-    return JsonUtils.stringToJsonNode(new PostQueryCommand().setBrokerPort(String.valueOf(brokerPort))
-        .setQueryType(CommonConstants.Broker.Request.SQL).setAuthToken(_authToken).setQuery(query).run());
+    return JsonUtils.stringToJsonNode(
+        new PostQueryCommand().setBrokerPort(String.valueOf(brokerPort)).setAuthToken(_authToken).setQuery(query)
+            .run());
   }
 
   public static void registerDefaultPinotFS() {
@@ -266,8 +291,8 @@ public class QuickstartRunner {
       PinotFSFactory.register(scheme, fsClassName, new PinotConfiguration(configs));
       LOGGER.info("Registered PinotFS for scheme: {}", scheme);
     } catch (Exception e) {
-      LOGGER
-          .error("Unable to init PinotFS for scheme: {}, class name: {}, configs: {}", scheme, fsClassName, configs, e);
+      LOGGER.error("Unable to init PinotFS for scheme: {}, class name: {}, configs: {}", scheme, fsClassName, configs,
+          e);
     }
   }
 }

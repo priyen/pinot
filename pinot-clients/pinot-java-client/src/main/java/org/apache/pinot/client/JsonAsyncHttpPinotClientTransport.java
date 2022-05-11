@@ -22,9 +22,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.ning.http.client.AsyncHttpClient;
-import com.ning.http.client.AsyncHttpClientConfig;
-import com.ning.http.client.Response;
+import io.netty.handler.ssl.ClientAuth;
+import io.netty.handler.ssl.JdkSslContext;
+import io.netty.handler.ssl.SslContext;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -33,6 +35,11 @@ import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import javax.net.ssl.SSLContext;
 import org.apache.pinot.spi.utils.CommonConstants;
+import org.asynchttpclient.AsyncHttpClient;
+import org.asynchttpclient.BoundRequestBuilder;
+import org.asynchttpclient.DefaultAsyncHttpClientConfig.Builder;
+import org.asynchttpclient.Dsl;
+import org.asynchttpclient.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,67 +54,73 @@ public class JsonAsyncHttpPinotClientTransport implements PinotClientTransport {
   private final Map<String, String> _headers;
   private final String _scheme;
 
+  private static final long BROKER_READ_TIMEOUT_MS = 60000L;
+  private static final int BROKER_CONNECT_TIMEOUT_MS = 2000;
+
   private final AsyncHttpClient _httpClient;
 
   public JsonAsyncHttpPinotClientTransport() {
     _headers = new HashMap<>();
     _scheme = CommonConstants.HTTP_PROTOCOL;
-    _httpClient = new AsyncHttpClient();
+    _httpClient = Dsl.asyncHttpClient();
   }
 
   public JsonAsyncHttpPinotClientTransport(Map<String, String> headers, String scheme,
-      @Nullable SSLContext sslContext) {
+    @Nullable SSLContext sslContext) {
     _headers = headers;
     _scheme = scheme;
 
-    AsyncHttpClientConfig.Builder builder = new AsyncHttpClientConfig.Builder();
+    Builder builder = Dsl.config();
     if (sslContext != null) {
-      builder.setSSLContext(sslContext);
+      builder.setSslContext(new JdkSslContext(sslContext, true, ClientAuth.OPTIONAL));
     }
 
-    _httpClient = new AsyncHttpClient(builder.build());
+    builder.setReadTimeout((int) BROKER_READ_TIMEOUT_MS)
+        .setConnectTimeout(BROKER_CONNECT_TIMEOUT_MS);
+    _httpClient = Dsl.asyncHttpClient(builder.build());
+  }
+
+  public JsonAsyncHttpPinotClientTransport(Map<String, String> headers, String scheme,
+    @Nullable SslContext sslContext) {
+    _headers = headers;
+    _scheme = scheme;
+
+    Builder builder = Dsl.config();
+    if (sslContext != null) {
+      builder.setSslContext(sslContext);
+    }
+
+    _httpClient = Dsl.asyncHttpClient(builder.build());
   }
 
   @Override
   public BrokerResponse executeQuery(String brokerAddress, String query)
-      throws PinotClientException {
+    throws PinotClientException {
     try {
-      return executeQueryAsync(brokerAddress, query).get();
+      return executeQueryAsync(brokerAddress, query).get(BROKER_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     } catch (Exception e) {
       throw new PinotClientException(e);
     }
   }
 
   @Override
-  public Future<BrokerResponse> executeQueryAsync(String brokerAddress, final String query) {
-    return executeQueryAsync(brokerAddress, new Request("pql", query));
-  }
-
-  public Future<BrokerResponse> executePinotQueryAsync(String brokerAddress, final Request request) {
+  public Future<BrokerResponse> executeQueryAsync(String brokerAddress, String query) {
     try {
       ObjectNode json = JsonNodeFactory.instance.objectNode();
-      String queryFormat = request.getQueryFormat();
-      json.put(queryFormat, request.getQuery());
+      json.put("sql", query);
+      json.put("queryOptions", "groupByMode=sql;responseFormat=sql");
 
-      final String url;
-      if (queryFormat.equalsIgnoreCase("sql")) {
-        url = _scheme + "://" + brokerAddress + "/query/sql";
-        json.put("queryOptions", "groupByMode=sql;responseFormat=sql");
-      } else {
-        url = _scheme + "://" + brokerAddress + "/query";
-      }
-
-      AsyncHttpClient.BoundRequestBuilder requestBuilder = _httpClient.preparePost(url);
+      String url = _scheme + "://" + brokerAddress + "/query/sql";
+      BoundRequestBuilder requestBuilder = _httpClient.preparePost(url);
 
       if (_headers != null) {
         _headers.forEach((k, v) -> requestBuilder.addHeader(k, v));
       }
 
-      final Future<Response> response =
+      Future<Response> response =
           requestBuilder.addHeader("Content-Type", "application/json; charset=utf-8").setBody(json.toString())
               .execute();
-
-      return new BrokerResponseFuture(response, request.getQuery(), url);
+      return new BrokerResponseFuture(response, query, url);
     } catch (Exception e) {
       throw new PinotClientException(e);
     }
@@ -117,7 +130,7 @@ public class JsonAsyncHttpPinotClientTransport implements PinotClientTransport {
   public BrokerResponse executeQuery(String brokerAddress, Request request)
       throws PinotClientException {
     try {
-      return executeQueryAsync(brokerAddress, request).get();
+      return executeQueryAsync(brokerAddress, request).get(BROKER_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     } catch (Exception e) {
       throw new PinotClientException(e);
     }
@@ -126,7 +139,7 @@ public class JsonAsyncHttpPinotClientTransport implements PinotClientTransport {
   @Override
   public Future<BrokerResponse> executeQueryAsync(String brokerAddress, Request request)
       throws PinotClientException {
-    return executePinotQueryAsync(brokerAddress, request);
+    return executeQueryAsync(brokerAddress, request.getQuery());
   }
 
   @Override
@@ -135,7 +148,11 @@ public class JsonAsyncHttpPinotClientTransport implements PinotClientTransport {
     if (_httpClient.isClosed()) {
       throw new PinotClientException("Connection is already closed!");
     }
-    _httpClient.close();
+    try {
+      _httpClient.close();
+    } catch (IOException exception) {
+      throw new PinotClientException("Error while closing connection!");
+    }
   }
 
   private static class BrokerResponseFuture implements Future<BrokerResponse> {
@@ -167,7 +184,7 @@ public class JsonAsyncHttpPinotClientTransport implements PinotClientTransport {
     @Override
     public BrokerResponse get()
         throws ExecutionException {
-      return get(1000L, TimeUnit.DAYS);
+      return get(BROKER_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -185,7 +202,7 @@ public class JsonAsyncHttpPinotClientTransport implements PinotClientTransport {
               "Pinot returned HTTP status " + httpResponse.getStatusCode() + ", expected 200");
         }
 
-        String responseBody = httpResponse.getResponseBody("UTF-8");
+        String responseBody = httpResponse.getResponseBody(StandardCharsets.UTF_8);
         return BrokerResponse.fromJson(OBJECT_READER.readTree(responseBody));
       } catch (Exception e) {
         throw new ExecutionException(e);

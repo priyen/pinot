@@ -24,8 +24,10 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.List;
 import org.apache.pinot.broker.requesthandler.BrokerRequestHandler;
-import org.apache.pinot.broker.routing.RoutingManager;
+import org.apache.pinot.broker.routing.BrokerRoutingManager;
 import org.apache.pinot.common.metrics.BrokerMetrics;
+import org.apache.pinot.core.api.ServiceAutoDiscoveryFeature;
+import org.apache.pinot.core.query.executor.sql.SqlQueryExecutor;
 import org.apache.pinot.core.transport.ListenerConfig;
 import org.apache.pinot.core.util.ListenerConfigUtil;
 import org.apache.pinot.spi.env.PinotConfiguration;
@@ -46,15 +48,18 @@ public class BrokerAdminApiApplication extends ResourceConfig {
 
   private HttpServer _httpServer;
 
-  public BrokerAdminApiApplication(RoutingManager routingManager, BrokerRequestHandler brokerRequestHandler,
-      BrokerMetrics brokerMetrics, PinotConfiguration brokerConf) {
+  public BrokerAdminApiApplication(BrokerRoutingManager routingManager, BrokerRequestHandler brokerRequestHandler,
+      BrokerMetrics brokerMetrics, PinotConfiguration brokerConf, SqlQueryExecutor sqlQueryExecutor) {
     packages(RESOURCE_PACKAGE);
     property(PINOT_CONFIGURATION, brokerConf);
-
+    if (brokerConf.getProperty(CommonConstants.Broker.BROKER_SERVICE_AUTO_DISCOVERY, false)) {
+      register(ServiceAutoDiscoveryFeature.class);
+    }
     register(new AbstractBinder() {
       @Override
       protected void configure() {
-        bind(routingManager).to(RoutingManager.class);
+        bind(sqlQueryExecutor).to(SqlQueryExecutor.class);
+        bind(routingManager).to(BrokerRoutingManager.class);
         bind(brokerRequestHandler).to(BrokerRequestHandler.class);
         bind(brokerMetrics).to(BrokerMetrics.class);
         bind(brokerConf.getProperty(CommonConstants.Broker.CONFIG_OF_BROKER_ID)).named(BROKER_INSTANCE_ID);
@@ -82,7 +87,7 @@ public class BrokerAdminApiApplication extends ResourceConfig {
     BeanConfig beanConfig = new BeanConfig();
     beanConfig.setTitle("Pinot Broker API");
     beanConfig.setDescription("APIs for accessing Pinot broker information");
-    beanConfig.setContact("https://github.com/apache/incubator-pinot");
+    beanConfig.setContact("https://github.com/apache/pinot");
     beanConfig.setVersion("1.0");
     beanConfig.setSchemes(new String[]{CommonConstants.HTTP_PROTOCOL, CommonConstants.HTTPS_PROTOCOL});
     beanConfig.setBasePath("/");
@@ -94,7 +99,7 @@ public class BrokerAdminApiApplication extends ResourceConfig {
     _httpServer.getServerConfiguration().addHttpHandler(httpHandler, "/api/", "/help/");
 
     URL swaggerDistLocation =
-        BrokerAdminApiApplication.class.getClassLoader().getResource("META-INF/resources/webjars/swagger-ui/3.18.2/");
+        BrokerAdminApiApplication.class.getClassLoader().getResource("META-INF/resources/webjars/swagger-ui/3.23.11/");
     CLStaticHttpHandler swaggerDist = new CLStaticHttpHandler(new URLClassLoader(new URL[]{swaggerDistLocation}));
     _httpServer.getServerConfiguration().addHttpHandler(swaggerDist, "/swaggerui-dist/");
   }

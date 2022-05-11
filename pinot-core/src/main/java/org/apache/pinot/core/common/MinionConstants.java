@@ -47,6 +47,15 @@ public class MinionConstants {
   public static final String INITIAL_RETRY_DELAY_MS_KEY = "initialRetryDelayMs";
   public static final String RETRY_SCALE_FACTOR_KEY = "retryScaleFactor";
 
+  /**
+   * Cluster level configs
+   */
+  public static final String TIMEOUT_MS_KEY_SUFFIX = ".timeoutMs";
+  public static final String NUM_CONCURRENT_TASKS_PER_INSTANCE_KEY_SUFFIX = ".numConcurrentTasksPerInstance";
+
+  /**
+   * Table level configs
+   */
   public static final String TABLE_MAX_NUM_TASKS_KEY = "tableMaxNumTasks";
   public static final String ENABLE_REPLACE_SEGMENTS_KEY = "enableReplaceSegments";
 
@@ -78,6 +87,7 @@ public class MinionConstants {
     // Time handling config
     public static final String WINDOW_START_MS_KEY = "windowStartMs";
     public static final String WINDOW_END_MS_KEY = "windowEndMs";
+    public static final String NEGATE_WINDOW_FILTER = "negateWindowFilter";
     public static final String ROUND_BUCKET_TIME_PERIOD_KEY = "roundBucketTimePeriod";
     public static final String PARTITION_BUCKET_TIME_PERIOD_KEY = "partitionBucketTimePeriod";
 
@@ -90,6 +100,13 @@ public class MinionConstants {
     public static final String MAX_NUM_RECORDS_PER_SEGMENT_KEY = "maxNumRecordsPerSegment";
     public static final String MAX_NUM_PARALLEL_BUCKETS = "maxNumParallelBuckets";
     public static final String SEGMENT_NAME_PREFIX_KEY = "segmentNamePrefix";
+    public static final String SEGMENT_NAME_POSTFIX_KEY = "segmentNamePostfix";
+    public static final String FIXED_SEGMENT_NAME_KEY = "fixedSegmentName";
+
+    // This field is set in segment metadata custom map to indicate if the segment is safe to be merged.
+    // Tasks can take use of this field to coordinate with the merge task. By default, segment is safe
+    // to merge, so existing segments w/o this field can be merged just as before.
+    public static final String SEGMENT_ZK_METADATA_SHOULD_NOT_MERGE_KEY = "shouldNotMerge";
   }
 
   public static class MergeRollupTask extends MergeTask {

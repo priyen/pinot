@@ -21,15 +21,16 @@ package org.apache.pinot.core.transport;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeoutException;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
+import org.apache.pinot.common.config.NettyConfig;
+import org.apache.pinot.common.config.TlsConfig;
 import org.apache.pinot.common.metrics.BrokerMeter;
 import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.request.BrokerRequest;
 import org.apache.pinot.common.request.InstanceRequest;
-import org.apache.pinot.common.request.PinotQuery;
 import org.apache.pinot.common.utils.DataTable;
 import org.apache.pinot.common.utils.DataTable.MetadataKey;
 import org.apache.pinot.spi.config.table.TableType;
@@ -54,31 +55,29 @@ public class QueryRouter {
   private final ConcurrentHashMap<Long, AsyncQueryResponse> _asyncQueryResponseMap = new ConcurrentHashMap<>();
 
   /**
-   * Create an unsecured query router
+   * Creates an unsecured query router.
    *
    * @param brokerId broker id
    * @param brokerMetrics broker metrics
    */
   public QueryRouter(String brokerId, BrokerMetrics brokerMetrics) {
-    _brokerId = brokerId;
-    _brokerMetrics = brokerMetrics;
-    _serverChannels = new ServerChannels(this, brokerMetrics);
-    _serverChannelsTls = null;
+    this(brokerId, brokerMetrics, null, null);
   }
 
   /**
-   * Create a query router with TLS config
+   * Creates a query router with TLS config.
    *
    * @param brokerId broker id
    * @param brokerMetrics broker metrics
+   * @param nettyConfig configurations for netty library
    * @param tlsConfig TLS config
    */
-  public QueryRouter(String brokerId, BrokerMetrics brokerMetrics, TlsConfig tlsConfig) {
+  public QueryRouter(String brokerId, BrokerMetrics brokerMetrics, @Nullable NettyConfig nettyConfig,
+      @Nullable TlsConfig tlsConfig) {
     _brokerId = brokerId;
     _brokerMetrics = brokerMetrics;
-    _serverChannels = new ServerChannels(this, brokerMetrics);
-    _serverChannelsTls =
-        Optional.ofNullable(tlsConfig).map(conf -> new ServerChannels(this, brokerMetrics, conf)).orElse(null);
+    _serverChannels = new ServerChannels(this, brokerMetrics, nettyConfig, null);
+    _serverChannelsTls = tlsConfig != null ? new ServerChannels(this, brokerMetrics, nettyConfig, tlsConfig) : null;
   }
 
   public AsyncQueryResponse submitQuery(long requestId, String rawTableName,
@@ -119,19 +118,47 @@ public class QueryRouter {
       ServerRoutingInstance serverRoutingInstance = entry.getKey();
       ServerChannels serverChannels = serverRoutingInstance.isTlsEnabled() ? _serverChannelsTls : _serverChannels;
       try {
-        serverChannels.sendRequest(rawTableName, asyncQueryResponse, serverRoutingInstance, entry.getValue());
+        serverChannels.sendRequest(rawTableName, asyncQueryResponse, serverRoutingInstance, entry.getValue(),
+            timeoutMs);
         asyncQueryResponse.markRequestSubmitted(serverRoutingInstance);
+      } catch (TimeoutException e) {
+        if (ServerChannels.CHANNEL_LOCK_TIMEOUT_MSG.equals(e.getMessage())) {
+          _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.REQUEST_CHANNEL_LOCK_TIMEOUT_EXCEPTIONS, 1);
+        }
+        markQueryFailed(requestId, serverRoutingInstance, asyncQueryResponse, e);
+        break;
       } catch (Exception e) {
-        LOGGER.error("Caught exception while sending request {} to server: {}, marking query failed", requestId,
-            serverRoutingInstance, e);
         _brokerMetrics.addMeteredTableValue(rawTableName, BrokerMeter.REQUEST_SEND_EXCEPTIONS, 1);
-        asyncQueryResponse.setBrokerRequestSendException(e);
-        asyncQueryResponse.markQueryFailed();
+        markQueryFailed(requestId, serverRoutingInstance, asyncQueryResponse, e);
         break;
       }
     }
 
     return asyncQueryResponse;
+  }
+
+  private void markQueryFailed(long requestId, ServerRoutingInstance serverRoutingInstance,
+      AsyncQueryResponse asyncQueryResponse, Exception e) {
+    LOGGER.error("Caught exception while sending request {} to server: {}, marking query failed", requestId,
+        serverRoutingInstance, e);
+    asyncQueryResponse.markQueryFailed(serverRoutingInstance, e);
+  }
+
+  /**
+   * Connects to the given server, returns {@code true} if the server is successfully connected.
+   */
+  public boolean connect(ServerInstance serverInstance) {
+    try {
+      if (_serverChannelsTls != null) {
+        _serverChannelsTls.connect(serverInstance.toServerRoutingInstance(TableType.OFFLINE, true));
+      } else {
+        _serverChannels.connect(serverInstance.toServerRoutingInstance(TableType.OFFLINE, false));
+      }
+      return true;
+    } catch (Exception e) {
+      LOGGER.debug("Failed to connect to server: {}", serverInstance, e);
+      return false;
+    }
   }
 
   public void shutDown() {
@@ -149,9 +176,9 @@ public class QueryRouter {
     }
   }
 
-  void markServerDown(ServerRoutingInstance serverRoutingInstance) {
+  void markServerDown(ServerRoutingInstance serverRoutingInstance, Exception exception) {
     for (AsyncQueryResponse asyncQueryResponse : _asyncQueryResponseMap.values()) {
-      asyncQueryResponse.markServerDown(serverRoutingInstance);
+      asyncQueryResponse.markServerDown(serverRoutingInstance, exception);
     }
   }
 
@@ -163,9 +190,7 @@ public class QueryRouter {
     InstanceRequest instanceRequest = new InstanceRequest();
     instanceRequest.setRequestId(requestId);
     instanceRequest.setQuery(brokerRequest);
-    PinotQuery pinotQuery = brokerRequest.getPinotQuery();
-    Map<String, String> queryOptions =
-        pinotQuery != null ? pinotQuery.getQueryOptions() : brokerRequest.getQueryOptions();
+    Map<String, String> queryOptions = brokerRequest.getPinotQuery().getQueryOptions();
     if (queryOptions != null) {
       instanceRequest.setEnableTrace(Boolean.parseBoolean(queryOptions.get(CommonConstants.Broker.Request.TRACE)));
     }

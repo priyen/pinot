@@ -135,6 +135,20 @@ public class FilterOperatorUtils {
   }
 
   /**
+   * Returns the NOT filter operator or equivalent filter operator.
+   */
+  public static BaseFilterOperator getNotFilterOperator(BaseFilterOperator filterOperator, int numDocs,
+      @Nullable Map<String, String> debugOptions) {
+    if (filterOperator.isResultMatchingAll()) {
+      return EmptyFilterOperator.getInstance();
+    } else if (filterOperator.isResultEmpty()) {
+      return new MatchAllFilterOperator(numDocs);
+    }
+
+    return new NotFilterOperator(filterOperator, numDocs);
+  }
+
+  /**
    * For AND filter operator, reorders its child filter operators based on the their cost and puts the ones with
    * inverted index first in order to reduce the number of documents to be processed.
    * <p>Special filter operators such as {@link MatchAllFilterOperator} and {@link EmptyFilterOperator} should be
@@ -155,7 +169,8 @@ public class FilterOperatorUtils {
         if (filterOperator instanceof BitmapBasedFilterOperator) {
           return 1;
         }
-        if (filterOperator instanceof RangeIndexBasedFilterOperator || filterOperator instanceof TextMatchFilterOperator
+        if (filterOperator instanceof RangeIndexBasedFilterOperator
+            || filterOperator instanceof TextContainsFilterOperator || filterOperator instanceof TextMatchFilterOperator
             || filterOperator instanceof JsonMatchFilterOperator || filterOperator instanceof H3IndexFilterOperator) {
           return 2;
         }
@@ -164,6 +179,9 @@ public class FilterOperatorUtils {
         }
         if (filterOperator instanceof OrFilterOperator) {
           return 4;
+        }
+        if (filterOperator instanceof NotFilterOperator) {
+          return getPriority(((NotFilterOperator) filterOperator).getChildFilterOperator());
         }
         if (filterOperator instanceof ScanBasedFilterOperator) {
           return getScanBasedFilterPriority((ScanBasedFilterOperator) filterOperator, 5, debugOptions);

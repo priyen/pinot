@@ -18,7 +18,6 @@
  */
 package org.apache.pinot.plugin.minion.tasks.mergerollup;
 
-import com.google.common.base.Preconditions;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -39,13 +38,14 @@ import org.apache.pinot.common.metadata.segment.SegmentPartitionMetadata;
 import org.apache.pinot.common.metadata.segment.SegmentZKMetadata;
 import org.apache.pinot.common.metrics.ControllerMetrics;
 import org.apache.pinot.common.minion.MergeRollupTaskMetadata;
-import org.apache.pinot.controller.helix.core.minion.ClusterInfoAccessor;
+import org.apache.pinot.controller.helix.core.minion.generator.BaseTaskGenerator;
 import org.apache.pinot.controller.helix.core.minion.generator.PinotTaskGenerator;
 import org.apache.pinot.controller.helix.core.minion.generator.TaskGeneratorUtils;
 import org.apache.pinot.core.common.MinionConstants;
 import org.apache.pinot.core.common.MinionConstants.MergeRollupTask;
 import org.apache.pinot.core.common.MinionConstants.MergeTask;
 import org.apache.pinot.core.minion.PinotTaskConfig;
+import org.apache.pinot.plugin.minion.tasks.MergeTaskUtils;
 import org.apache.pinot.spi.annotations.minion.TaskGenerator;
 import org.apache.pinot.spi.config.table.ColumnPartitionConfig;
 import org.apache.pinot.spi.config.table.SegmentPartitionConfig;
@@ -99,7 +99,7 @@ import org.slf4j.LoggerFactory;
  *        maxNumRecordsPerTask
  */
 @TaskGenerator
-public class MergeRollupTaskGenerator implements PinotTaskGenerator {
+public class MergeRollupTaskGenerator extends BaseTaskGenerator {
   private static final Logger LOGGER = LoggerFactory.getLogger(MergeRollupTaskGenerator.class);
 
   private static final int DEFAULT_MAX_NUM_RECORDS_PER_TASK = 50_000_000;
@@ -113,17 +113,9 @@ public class MergeRollupTaskGenerator implements PinotTaskGenerator {
   private static final String MERGE_ROLLUP_TASK_DELAY_IN_NUM_BUCKETS = "mergeRollupTaskDelayInNumBuckets";
 
   // tableNameWithType -> mergeLevel -> watermarkMs
-  private Map<String, Map<String, Long>> _mergeRollupWatermarks;
+  private final Map<String, Map<String, Long>> _mergeRollupWatermarks = new HashMap<>();
   // tableNameWithType -> maxValidBucketEndTime
-  private Map<String, Long> _tableMaxValidBucketEndTimeMs;
-  private ClusterInfoAccessor _clusterInfoAccessor;
-
-  @Override
-  public void init(ClusterInfoAccessor clusterInfoAccessor) {
-    _clusterInfoAccessor = clusterInfoAccessor;
-    _mergeRollupWatermarks = new HashMap<>();
-    _tableMaxValidBucketEndTimeMs = new HashMap<>();
-  }
+  private final Map<String, Long> _tableMaxValidBucketEndTimeMs = new HashMap<>();
 
   @Override
   public String getTaskType() {
@@ -154,7 +146,8 @@ public class MergeRollupTaskGenerator implements PinotTaskGenerator {
 
       List<SegmentZKMetadata> preSelectedSegments = new ArrayList<>();
       for (SegmentZKMetadata segment : allSegments) {
-        if (preSelectedSegmentsBasedOnLineage.contains(segment.getSegmentName()) && segment.getTotalDocs() > 0) {
+        if (preSelectedSegmentsBasedOnLineage.contains(segment.getSegmentName()) && segment.getTotalDocs() > 0
+            && MergeTaskUtils.allowMerge(segment)) {
           preSelectedSegments.add(segment);
         }
       }
@@ -359,33 +352,41 @@ public class MergeRollupTaskGenerator implements PinotTaskGenerator {
                     mergeConfigs, taskConfigs));
           }
         } else {
-          // For partitioned table, schedule separate tasks for each partition
+          // For partitioned table, schedule separate tasks for each partitionId (partitionId is constructed from
+          // partitions of all partition columns. There should be exact match between partition columns of segment and
+          // partition columns of table configuration, and there is only partition per column in segment metadata).
+          // Other segments which do not meet these conditions are considered as outlier segments, and additional tasks
+          // are generated for them.
           Map<String, ColumnPartitionConfig> columnPartitionMap = segmentPartitionConfig.getColumnPartitionMap();
-          Preconditions.checkState(columnPartitionMap.size() == 1, "Cannot partition on multiple columns for table: %s",
-              tableConfig.getTableName());
-          Map.Entry<String, ColumnPartitionConfig> partitionEntry = columnPartitionMap.entrySet().iterator().next();
-          String partitionColumn = partitionEntry.getKey();
-
+          List<String> partitionColumns = new ArrayList<>(columnPartitionMap.keySet());
           for (List<SegmentZKMetadata> selectedSegmentsPerBucket : selectedSegmentsForAllBuckets) {
-            Map<Integer, List<SegmentZKMetadata>> partitionToSegments = new HashMap<>();
-            // Handle segments that have multiple partitions or no partition info
+            Map<List<Integer>, List<SegmentZKMetadata>> partitionToSegments = new HashMap<>();
             List<SegmentZKMetadata> outlierSegments = new ArrayList<>();
             for (SegmentZKMetadata selectedSegment : selectedSegmentsPerBucket) {
               SegmentPartitionMetadata segmentPartitionMetadata = selectedSegment.getPartitionMetadata();
-              if (segmentPartitionMetadata == null
-                  || segmentPartitionMetadata.getPartitions(partitionColumn).size() != 1) {
+              List<Integer> partitions = new ArrayList<>();
+              if (segmentPartitionMetadata != null && columnPartitionMap.keySet()
+                  .equals(segmentPartitionMetadata.getColumnPartitionMap().keySet())) {
+                for (String partitionColumn : partitionColumns) {
+                  if (segmentPartitionMetadata.getPartitions(partitionColumn).size() == 1) {
+                    partitions.add(segmentPartitionMetadata.getPartitions(partitionColumn).iterator().next());
+                  } else {
+                    partitions.clear();
+                    break;
+                  }
+                }
+              }
+              if (partitions.isEmpty()) {
                 outlierSegments.add(selectedSegment);
               } else {
-                int partition = segmentPartitionMetadata.getPartitions(partitionColumn).iterator().next();
-                partitionToSegments.computeIfAbsent(partition, k -> new ArrayList<>()).add(selectedSegment);
+                partitionToSegments.computeIfAbsent(partitions, k -> new ArrayList<>()).add(selectedSegment);
               }
             }
 
-            for (Map.Entry<Integer, List<SegmentZKMetadata>> partitionToSegmentsEntry
-                : partitionToSegments.entrySet()) {
+            for (List<SegmentZKMetadata> partitionedSegments : partitionToSegments.values()) {
               pinotTaskConfigsForTable.addAll(
-                  createPinotTaskConfigs(partitionToSegmentsEntry.getValue(), offlineTableName, maxNumRecordsPerTask,
-                      mergeLevel, mergeConfigs, taskConfigs));
+                  createPinotTaskConfigs(partitionedSegments, offlineTableName, maxNumRecordsPerTask, mergeLevel,
+                      mergeConfigs, taskConfigs));
             }
 
             if (!outlierSegments.isEmpty()) {

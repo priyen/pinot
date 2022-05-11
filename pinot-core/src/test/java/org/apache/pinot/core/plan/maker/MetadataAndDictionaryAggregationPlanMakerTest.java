@@ -27,10 +27,10 @@ import java.util.concurrent.TimeUnit;
 import org.apache.commons.io.FileUtils;
 import org.apache.pinot.common.metrics.ServerMetrics;
 import org.apache.pinot.core.common.Operator;
-import org.apache.pinot.core.operator.query.AggregationGroupByOperator;
+import org.apache.pinot.core.operator.query.AggregationGroupByOrderByOperator;
 import org.apache.pinot.core.operator.query.AggregationOperator;
-import org.apache.pinot.core.operator.query.DictionaryBasedAggregationOperator;
-import org.apache.pinot.core.operator.query.MetadataBasedAggregationOperator;
+import org.apache.pinot.core.operator.query.FastFilteredCountOperator;
+import org.apache.pinot.core.operator.query.NonScanBasedAggregationOperator;
 import org.apache.pinot.core.operator.query.SelectionOnlyOperator;
 import org.apache.pinot.core.query.request.context.QueryContext;
 import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
@@ -41,7 +41,7 @@ import org.apache.pinot.segment.local.upsert.PartitionUpsertMetadataManager;
 import org.apache.pinot.segment.spi.IndexSegment;
 import org.apache.pinot.segment.spi.creator.SegmentGeneratorConfig;
 import org.apache.pinot.segment.spi.creator.SegmentIndexCreationDriver;
-import org.apache.pinot.segment.spi.index.ThreadSafeMutableRoaringBitmap;
+import org.apache.pinot.segment.spi.index.mutable.ThreadSafeMutableRoaringBitmap;
 import org.apache.pinot.spi.config.table.TableConfig;
 import org.apache.pinot.spi.config.table.TableType;
 import org.apache.pinot.spi.config.table.UpsertConfig;
@@ -141,7 +141,7 @@ public class MetadataAndDictionaryAggregationPlanMakerTest {
   @Test(dataProvider = "testPlanMakerDataProvider")
   public void testPlanMaker(String query, Class<? extends Operator<?>> operatorClass,
       Class<? extends Operator<?>> upsertOperatorClass) {
-    QueryContext queryContext = QueryContextConverterUtils.getQueryContextFromSQL(query);
+    QueryContext queryContext = QueryContextConverterUtils.getQueryContext(query);
     Operator<?> operator = PLAN_MAKER.makeSegmentPlanNode(_indexSegment, queryContext).run();
     assertTrue(operatorClass.isInstance(operator));
     Operator<?> upsertOperator = PLAN_MAKER.makeSegmentPlanNode(_upsertIndexSegment, queryContext).run();
@@ -163,34 +163,34 @@ public class MetadataAndDictionaryAggregationPlanMakerTest {
     entries.add(new Object[]{
         "select * from testTable where daysSinceEpoch > 100", SelectionOnlyOperator.class, SelectionOnlyOperator.class
     });
-    // COUNT from metadata
+    // COUNT from metadata (via fast filtered count which knows the number of docs in the segment)
     entries.add(new Object[]{
-        "select count(*) from testTable", MetadataBasedAggregationOperator.class, AggregationOperator.class
+        "select count(*) from testTable", FastFilteredCountOperator.class, FastFilteredCountOperator.class
     });
     // COUNT from metadata with match all filter
     entries.add(new Object[]{
-        "select count(*) from testTable where column1 > 10", MetadataBasedAggregationOperator.class,
-        AggregationOperator.class
+        "select count(*) from testTable where column1 > 10", FastFilteredCountOperator.class,
+        FastFilteredCountOperator.class
     });
     // MIN/MAX from dictionary
     entries.add(new Object[]{
-        "select max(daysSinceEpoch),min(daysSinceEpoch) from testTable", DictionaryBasedAggregationOperator.class,
+        "select max(daysSinceEpoch),min(daysSinceEpoch) from testTable", NonScanBasedAggregationOperator.class,
         AggregationOperator.class
     });
     // MIN/MAX from dictionary with match all filter
     entries.add(new Object[]{
         "select max(daysSinceEpoch),min(daysSinceEpoch) from testTable where column1 > 10",
-        DictionaryBasedAggregationOperator.class, AggregationOperator.class
+        NonScanBasedAggregationOperator.class, AggregationOperator.class
     });
     // MINMAXRANGE from dictionary
     entries.add(new Object[]{
-        "select minmaxrange(daysSinceEpoch) from testTable", DictionaryBasedAggregationOperator.class,
+        "select minmaxrange(daysSinceEpoch) from testTable", NonScanBasedAggregationOperator.class,
         AggregationOperator.class
     });
     // MINMAXRANGE from dictionary with match all filter
     entries.add(new Object[]{
-        "select minmaxrange(daysSinceEpoch) from testTable where column1 > 10",
-        DictionaryBasedAggregationOperator.class, AggregationOperator.class
+        "select minmaxrange(daysSinceEpoch) from testTable where column1 > 10", NonScanBasedAggregationOperator.class,
+        AggregationOperator.class
     });
     // Aggregation
     entries.add(new Object[]{
@@ -198,17 +198,17 @@ public class MetadataAndDictionaryAggregationPlanMakerTest {
     });
     // Aggregation group-by
     entries.add(new Object[]{
-        "select sum(column1) from testTable group by daysSinceEpoch", AggregationGroupByOperator.class,
-        AggregationGroupByOperator.class
+        "select sum(column1) from testTable group by daysSinceEpoch", AggregationGroupByOrderByOperator.class,
+        AggregationGroupByOrderByOperator.class
     });
     // COUNT from metadata, MIN from dictionary
     entries.add(new Object[]{
-        "select count(*),min(column17) from testTable", AggregationOperator.class, AggregationOperator.class
+        "select count(*),min(column17) from testTable", NonScanBasedAggregationOperator.class, AggregationOperator.class
     });
     // Aggregation group-by
     entries.add(new Object[]{
         "select count(*),min(daysSinceEpoch) from testTable group by daysSinceEpoch",
-        AggregationGroupByOperator.class, AggregationGroupByOperator.class
+        AggregationGroupByOrderByOperator.class, AggregationGroupByOrderByOperator.class
     });
 
     return entries.toArray(new Object[entries.size()][]);

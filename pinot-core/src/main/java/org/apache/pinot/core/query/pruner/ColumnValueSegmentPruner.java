@@ -176,6 +176,9 @@ public class ColumnValueSegmentPruner implements SegmentPruner {
           extractPredicateColumns(child, eqInColumns, rangeColumns);
         }
         break;
+      case NOT:
+        // Do not track the predicates under NOT filter
+        break;
       case PREDICATE:
         Predicate predicate = filter.getPredicate();
 
@@ -215,6 +218,9 @@ public class ColumnValueSegmentPruner implements SegmentPruner {
           }
         }
         return true;
+      case NOT:
+        // Do not prune NOT filter
+        return false;
       case PREDICATE:
         Predicate predicate = filter.getPredicate();
         // Only prune columns
@@ -302,23 +308,28 @@ public class ColumnValueSegmentPruner implements SegmentPruner {
     }
 
     // Check min/max value
+    boolean someInRange = false;
     for (String value : values) {
       Comparable inValue = convertValue(value, dataSourceMetadata.getDataType());
       if (checkMinMaxRange(dataSourceMetadata, inValue)) {
-        return false;
+        someInRange = true;
+        break;
       }
+    }
+    if (!someInRange) {
+      return true;
     }
 
     // Check bloom filter
     BloomFilterReader bloomFilter = dataSource.getBloomFilter();
-    if (bloomFilter != null) {
-      for (String value : values) {
-        if (bloomFilter.mightContain(value)) {
-          return false;
-        }
+    if (bloomFilter == null) {
+      return false;
+    }
+    for (String value : values) {
+      if (bloomFilter.mightContain(value)) {
+        return false;
       }
     }
-
     return true;
   }
 

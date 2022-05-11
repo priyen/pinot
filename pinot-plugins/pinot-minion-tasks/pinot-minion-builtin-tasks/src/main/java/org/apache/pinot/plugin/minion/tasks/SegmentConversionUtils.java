@@ -23,6 +23,7 @@ import java.io.File;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import javax.annotation.Nullable;
 import javax.net.ssl.SSLContext;
 import org.apache.http.Header;
 import org.apache.http.HttpHeaders;
@@ -34,6 +35,7 @@ import org.apache.pinot.common.restlet.resources.StartReplaceSegmentsRequest;
 import org.apache.pinot.common.utils.FileUploadDownloadClient;
 import org.apache.pinot.common.utils.RoundRobinURIProvider;
 import org.apache.pinot.common.utils.SimpleHttpResponse;
+import org.apache.pinot.common.utils.http.HttpClient;
 import org.apache.pinot.core.common.MinionConstants;
 import org.apache.pinot.minion.MinionContext;
 import org.apache.pinot.spi.config.table.TableType;
@@ -61,7 +63,7 @@ public class SegmentConversionUtils {
   public static void uploadSegment(Map<String, String> configs, List<Header> httpHeaders,
       List<NameValuePair> parameters, String tableNameWithType, String segmentName, String uploadURL, File fileToUpload)
       throws Exception {
-    // Create a RoundRobinURIProvider to round robin IP addresses when retry uploading. Otherwise may always try to
+    // Create a RoundRobinURIProvider to round-robin IP addresses when retry uploading. Otherwise, it may always try to
     // upload to a same broken host as: 1) DNS may not RR the IP addresses 2) OS cache the DNS resolution result.
     RoundRobinURIProvider uriProvider = new RoundRobinURIProvider(new URI(uploadURL));
     // Generate retry policy based on the config
@@ -96,7 +98,7 @@ public class SegmentConversionUtils {
         try {
           SimpleHttpResponse response = fileUploadDownloadClient
               .uploadSegment(uri, segmentName, fileToUpload, httpHeaders, parameters,
-                  FileUploadDownloadClient.DEFAULT_SOCKET_TIMEOUT_MS);
+                  HttpClient.DEFAULT_SOCKET_TIMEOUT_MS);
           LOGGER.info("Got response {}: {} while uploading table: {}, segment: {} with uploadURL: {}",
               response.getStatusCode(), response.getResponse(), tableNameWithType, segmentName, uploadURL);
           return true;
@@ -122,15 +124,22 @@ public class SegmentConversionUtils {
   }
 
   public static String startSegmentReplace(String tableNameWithType, String uploadURL,
-      StartReplaceSegmentsRequest startReplaceSegmentsRequest)
+      StartReplaceSegmentsRequest startReplaceSegmentsRequest, @Nullable String authToken)
+      throws Exception {
+    return startSegmentReplace(tableNameWithType, uploadURL, startReplaceSegmentsRequest, authToken, true);
+  }
+
+  public static String startSegmentReplace(String tableNameWithType, String uploadURL,
+      StartReplaceSegmentsRequest startReplaceSegmentsRequest, @Nullable String authToken, boolean forceCleanup)
       throws Exception {
     String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
     TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableNameWithType);
     SSLContext sslContext = MinionContext.getInstance().getSSLContext();
     try (FileUploadDownloadClient fileUploadDownloadClient = new FileUploadDownloadClient(sslContext)) {
-      URI uri =
-          FileUploadDownloadClient.getStartReplaceSegmentsURI(new URI(uploadURL), rawTableName, tableType.name(), true);
-      SimpleHttpResponse response = fileUploadDownloadClient.startReplaceSegments(uri, startReplaceSegmentsRequest);
+      URI uri = FileUploadDownloadClient
+          .getStartReplaceSegmentsURI(new URI(uploadURL), rawTableName, tableType.name(), forceCleanup);
+      SimpleHttpResponse response =
+          fileUploadDownloadClient.startReplaceSegments(uri, startReplaceSegmentsRequest, authToken);
       String responseString = response.getResponse();
       LOGGER.info(
           "Got response {}: {} while sending start replace segment request for table: {}, uploadURL: {}, request: {}",
@@ -140,7 +149,7 @@ public class SegmentConversionUtils {
   }
 
   public static void endSegmentReplace(String tableNameWithType, String uploadURL, String segmentLineageEntryId,
-      int socketTimeoutMs)
+      int socketTimeoutMs, @Nullable String authToken)
       throws Exception {
     String rawTableName = TableNameBuilder.extractRawTableName(tableNameWithType);
     TableType tableType = TableNameBuilder.getTableTypeFromTableName(tableNameWithType);
@@ -148,7 +157,7 @@ public class SegmentConversionUtils {
     try (FileUploadDownloadClient fileUploadDownloadClient = new FileUploadDownloadClient(sslContext)) {
       URI uri = FileUploadDownloadClient
           .getEndReplaceSegmentsURI(new URI(uploadURL), rawTableName, tableType.name(), segmentLineageEntryId);
-      SimpleHttpResponse response = fileUploadDownloadClient.endReplaceSegments(uri, socketTimeoutMs);
+      SimpleHttpResponse response = fileUploadDownloadClient.endReplaceSegments(uri, socketTimeoutMs, authToken);
       LOGGER.info("Got response {}: {} while sending end replace segment request for table: {}, uploadURL: {}",
           response.getStatusCode(), response.getResponse(), tableNameWithType, uploadURL);
     }

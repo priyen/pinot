@@ -24,13 +24,13 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 import org.apache.pinot.common.metrics.BrokerMetrics;
 import org.apache.pinot.common.request.BrokerRequest;
-import org.apache.pinot.common.request.PinotQuery;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataTable;
 import org.apache.pinot.core.query.request.context.QueryContext;
-import org.apache.pinot.core.query.request.context.utils.BrokerRequestToQueryContextConverter;
+import org.apache.pinot.core.query.request.context.utils.QueryContextConverterUtils;
 import org.apache.pinot.core.transport.ServerRoutingInstance;
+import org.apache.pinot.core.util.GapfillUtils;
 import org.apache.pinot.spi.env.PinotConfiguration;
 import org.apache.pinot.spi.utils.CommonConstants;
 import org.apache.pinot.spi.utils.builder.TableNameBuilder;
@@ -46,16 +46,14 @@ public class BrokerReduceService extends BaseReduceService {
     super(config);
   }
 
-  public BrokerResponseNative reduceOnDataTable(BrokerRequest brokerRequest,
+  public BrokerResponseNative reduceOnDataTable(BrokerRequest brokerRequest, BrokerRequest serverBrokerRequest,
       Map<ServerRoutingInstance, DataTable> dataTableMap, long reduceTimeOutMs, @Nullable BrokerMetrics brokerMetrics) {
     if (dataTableMap.isEmpty()) {
       // Empty response.
       return BrokerResponseNative.empty();
     }
 
-    PinotQuery pinotQuery = brokerRequest.getPinotQuery();
-    Map<String, String> queryOptions =
-        pinotQuery != null ? pinotQuery.getQueryOptions() : brokerRequest.getQueryOptions();
+    Map<String, String> queryOptions = brokerRequest.getPinotQuery().getQueryOptions();
     boolean enableTrace =
         queryOptions != null && Boolean.parseBoolean(queryOptions.get(CommonConstants.Broker.Request.TRACE));
 
@@ -91,7 +89,7 @@ public class BrokerReduceService extends BaseReduceService {
       }
     }
 
-    String tableName = brokerRequest.getQuerySource().getTableName();
+    String tableName = serverBrokerRequest.getQuerySource().getTableName();
     String rawTableName = TableNameBuilder.extractRawTableName(tableName);
 
     // Set execution statistics and Update broker metrics.
@@ -103,11 +101,23 @@ public class BrokerReduceService extends BaseReduceService {
       return brokerResponseNative;
     }
 
-    QueryContext queryContext = BrokerRequestToQueryContextConverter.convert(brokerRequest);
-    DataTableReducer dataTableReducer = ResultReducerFactory.getResultReducer(queryContext);
+    QueryContext serverQueryContext = QueryContextConverterUtils.getQueryContext(serverBrokerRequest.getPinotQuery());
+    DataTableReducer dataTableReducer = ResultReducerFactory.getResultReducer(serverQueryContext);
     dataTableReducer.reduceAndSetResults(rawTableName, cachedDataSchema, dataTableMap, brokerResponseNative,
         new DataTableReducerContext(_reduceExecutorService, _maxReduceThreadsPerQuery, reduceTimeOutMs,
             _groupByTrimThreshold), brokerMetrics);
+    QueryContext queryContext;
+    if (brokerRequest == serverBrokerRequest) {
+      queryContext = serverQueryContext;
+    } else {
+      queryContext = QueryContextConverterUtils.getQueryContext(brokerRequest.getPinotQuery());
+      GapfillUtils.GapfillType gapfillType = GapfillUtils.getGapfillType(queryContext);
+      if (gapfillType != null) {
+        GapfillProcessor gapfillProcessor = new GapfillProcessor(queryContext, gapfillType);
+        gapfillProcessor.process(brokerResponseNative);
+      }
+    }
+
     updateAlias(queryContext, brokerResponseNative);
     return brokerResponseNative;
   }

@@ -21,8 +21,8 @@
 
 image:
   repository: apachepinot/pinot
-  tag: latest-jdk11 # release-0.7.1
-  pullPolicy: IfNotPresent
+  tag: latest # release-0.10.0
+  pullPolicy: Always # Use IfNotPresent when you pinged a version of image tag
 
 cluster:
   name: pinot-quickstart
@@ -52,6 +52,8 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template
   name: ""
 
+additionalMatchLabels: {}
+
 # ------------------------------------------------------------------------------
 # Pinot Controller:
 # ------------------------------------------------------------------------------
@@ -74,6 +76,8 @@ controller:
     size: 1G
     mountPath: /var/pinot/controller/data
     storageClass: ""
+    extraVolumes: []
+    extraVolumeMounts: []
 
   data:
     dir: /var/pinot/controller/data
@@ -105,6 +109,16 @@ controller:
     type: LoadBalancer
     port: 9000
     annotations: {}
+
+  ingress:
+    v1beta1:
+      enabled: false
+      annotations: { }
+      tls: { }
+      path: /
+      hosts: [ ]
+    v1:
+      enabled: false
 
   resources: {}
 
@@ -164,6 +178,10 @@ broker:
     livenessEnabled: true
     readinessEnabled: true
 
+  persistence:
+    extraVolumes: []
+    extraVolumeMounts: []
+
   service:
     annotations: {}
     clusterIP: "None"
@@ -182,6 +200,16 @@ broker:
     port: 8099
     # For example, in private GKE cluster, you might add cloud.google.com/load-balancer-type: Internal
     annotations: {}
+
+  ingress:
+    v1beta1:
+      enabled: false
+      annotations: {}
+      tls: {}
+      path: /
+      hosts: []
+    v1:
+      enabled: false
 
   resources: {}
 
@@ -242,6 +270,8 @@ server:
     mountPath: /var/pinot/server/data
     storageClass: ""
     #storageClass: "ssd"
+    extraVolumes: []
+    extraVolumeMounts: []
 
   jvmOpts: "-Xms512M -Xmx1G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Xlog:gc*:file=/opt/pinot/gc-pinot-server.log"
 
@@ -327,6 +357,8 @@ minion:
     mountPath: /var/pinot/minion/data
     storageClass: ""
     #storageClass: "ssd"
+    extraVolumes: []
+    extraVolumeMounts: []
 
   service:
     annotations: {}
@@ -381,7 +413,7 @@ minion:
 
 zookeeper:
   ## If true, install the Zookeeper chart alongside Pinot
-  ## ref: https://github.com/kubernetes/charts/tree/master/incubator/zookeeper
+  ## ref: https://github.com/bitnami/charts/tree/master/bitnami/zookeeper
   enabled: true
 
   ## If the Zookeeper Chart is disabled a URL override is required to connect

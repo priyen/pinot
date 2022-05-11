@@ -18,7 +18,11 @@
  */
 package org.apache.pinot.segment.spi;
 
-import org.apache.commons.lang3.StringUtils;
+import java.util.Arrays;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import org.apache.commons.lang.StringUtils;
 
 
 /**
@@ -33,6 +37,7 @@ public enum AggregationFunctionType {
   SUMPRECISION("sumPrecision"),
   AVG("avg"),
   MODE("mode"),
+  FIRSTWITHTIME("firstWithTime"),
   LASTWITHTIME("lastWithTime"),
   MINMAXRANGE("minMaxRange"),
   DISTINCTCOUNT("distinctCount"),
@@ -40,6 +45,7 @@ public enum AggregationFunctionType {
   SEGMENTPARTITIONEDDISTINCTCOUNT("segmentPartitionedDistinctCount"),
   DISTINCTCOUNTHLL("distinctCountHLL"),
   DISTINCTCOUNTRAWHLL("distinctCountRawHLL"),
+  DISTINCTCOUNTSMARTHLL("distinctCountSmartHLL"),
   FASTHLL("fastHLL"),
   DISTINCTCOUNTTHETASKETCH("distinctCountThetaSketch"),
   DISTINCTCOUNTRAWTHETASKETCH("distinctCountRawThetaSketch"),
@@ -48,6 +54,7 @@ public enum AggregationFunctionType {
   PERCENTILERAWEST("percentileRawEst"),
   PERCENTILETDIGEST("percentileTDigest"),
   PERCENTILERAWTDIGEST("percentileRawTDigest"),
+  PERCENTILESMARTTDIGEST("percentileSmartTDigest"),
   IDSET("idSet"),
 
   // Geo aggregation functions
@@ -71,6 +78,9 @@ public enum AggregationFunctionType {
   PERCENTILERAWTDIGESTMV("percentileRawTDigestMV"),
   DISTINCT("distinct");
 
+  private static final Set<String> NAMES = Arrays.stream(values()).flatMap(func -> Stream.of(func.name(),
+      func.getName(), func.getName().toLowerCase())).collect(Collectors.toSet());
+
   private final String _name;
 
   AggregationFunctionType(String name) {
@@ -81,14 +91,29 @@ public enum AggregationFunctionType {
     return _name;
   }
 
+  public static boolean isAggregationFunction(String functionName) {
+    if (NAMES.contains(functionName)) {
+      return true;
+    }
+    if (functionName.regionMatches(true, 0, "percentile", 0, 10)) {
+      try {
+        getAggregationFunctionType(functionName);
+        return true;
+      } catch (Exception ignore) {
+        return false;
+      }
+    }
+    String upperCaseFunctionName = StringUtils.remove(functionName, '_').toUpperCase();
+    return NAMES.contains(upperCaseFunctionName);
+  }
+
   /**
    * Returns the corresponding aggregation function type for the given function name.
    * <p>NOTE: Underscores in the function name are ignored.
    */
   public static AggregationFunctionType getAggregationFunctionType(String functionName) {
-    String upperCaseFunctionName = StringUtils.remove(functionName, '_').toUpperCase();
-    if (upperCaseFunctionName.startsWith("PERCENTILE")) {
-      String remainingFunctionName = upperCaseFunctionName.substring(10);
+    if (functionName.regionMatches(true, 0, "percentile", 0, 10)) {
+      String remainingFunctionName = StringUtils.remove(functionName, '_').substring(10).toUpperCase();
       if (remainingFunctionName.isEmpty() || remainingFunctionName.matches("\\d+")) {
         return PERCENTILE;
       } else if (remainingFunctionName.equals("EST") || remainingFunctionName.matches("EST\\d+")) {
@@ -114,7 +139,7 @@ public enum AggregationFunctionType {
       }
     } else {
       try {
-        return AggregationFunctionType.valueOf(upperCaseFunctionName);
+        return AggregationFunctionType.valueOf(StringUtils.remove(functionName, '_').toUpperCase());
       } catch (IllegalArgumentException e) {
         throw new IllegalArgumentException("Invalid aggregation function name: " + functionName);
       }

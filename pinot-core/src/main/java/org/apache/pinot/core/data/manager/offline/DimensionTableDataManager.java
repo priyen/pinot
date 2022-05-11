@@ -24,11 +24,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
-import javax.annotation.concurrent.GuardedBy;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import javax.annotation.concurrent.ThreadSafe;
+import org.apache.helix.ZNRecord;
+import org.apache.helix.store.zk.ZkHelixPropertyStore;
 import org.apache.pinot.common.metadata.ZKMetadataProvider;
 import org.apache.pinot.segment.local.data.manager.SegmentDataManager;
 import org.apache.pinot.segment.local.segment.index.loader.IndexLoadingConfig;
@@ -51,6 +50,7 @@ import org.apache.pinot.spi.data.readers.PrimaryKey;
  */
 @ThreadSafe
 public class DimensionTableDataManager extends OfflineTableDataManager {
+
   // Storing singletons per table in a HashMap
   private static final Map<String, DimensionTableDataManager> INSTANCES = new ConcurrentHashMap<>();
 
@@ -75,26 +75,19 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
     return INSTANCES.get(tableNameWithType);
   }
 
-  /**
-   * Instance properties/methods
-   */
-  private final ReadWriteLock _rwl = new ReentrantReadWriteLock();
-  private final Lock _lookupTableReadLock = _rwl.readLock();
-  private final Lock _lookupTableWriteLock = _rwl.writeLock();
+  @SuppressWarnings("rawtypes")
+  private static final AtomicReferenceFieldUpdater<DimensionTableDataManager, DimensionTable> UPDATER =
+      AtomicReferenceFieldUpdater.newUpdater(DimensionTableDataManager.class,
+          DimensionTable.class, "_dimensionTable");
 
-  // _lookupTable is a HashMap used for storing/serving records for a table keyed by table PK
-  @GuardedBy("_rwl")
-  private final Map<PrimaryKey, GenericRow> _lookupTable = new HashMap<>();
-  private Schema _tableSchema;
-  private List<String> _primaryKeyColumns;
+  private volatile DimensionTable _dimensionTable;
 
   @Override
   protected void doInit() {
     super.doInit();
-
     // dimension tables should always have schemas with primary keys
-    _tableSchema = ZKMetadataProvider.getTableSchema(_propertyStore, _tableNameWithType);
-    _primaryKeyColumns = _tableSchema.getPrimaryKeyColumns();
+    Schema tableSchema = ZKMetadataProvider.getTableSchema(_propertyStore, _tableNameWithType);
+    _dimensionTable = new DimensionTable(tableSchema, tableSchema.getPrimaryKeyColumns());
   }
 
   @Override
@@ -127,49 +120,53 @@ public class DimensionTableDataManager extends OfflineTableDataManager {
    */
   private void loadLookupTable()
       throws Exception {
-    _lookupTableWriteLock.lock();
-    try {
-      _lookupTable.clear();
-      List<SegmentDataManager> segmentManagers = acquireAllSegments();
-      if (segmentManagers.isEmpty()) {
-        return;
-      }
+    DimensionTable snapshot;
+    DimensionTable replacement;
+    do {
+      snapshot = _dimensionTable;
+      replacement = createDimensionTable();
+    } while (!UPDATER.compareAndSet(this, snapshot, replacement));
+  }
 
-      try {
-        for (SegmentDataManager segmentManager : segmentManagers) {
-          IndexSegment indexSegment = segmentManager.getSegment();
-          try (PinotSegmentRecordReader reader = new PinotSegmentRecordReader(
-              indexSegment.getSegmentMetadata().getIndexDir())) {
-            while (reader.hasNext()) {
-              GenericRow row = reader.next();
-              _lookupTable.put(row.getPrimaryKey(_primaryKeyColumns), row);
-            }
+  private DimensionTable createDimensionTable()
+      throws Exception {
+    Map<PrimaryKey, GenericRow> map = new HashMap<>();
+    List<SegmentDataManager> segmentManagers = acquireAllSegments();
+    try {
+      for (SegmentDataManager segmentManager : segmentManagers) {
+        IndexSegment indexSegment = segmentManager.getSegment();
+        try (PinotSegmentRecordReader reader = new PinotSegmentRecordReader(
+            indexSegment.getSegmentMetadata().getIndexDir())) {
+          while (reader.hasNext()) {
+            GenericRow row = reader.next();
+            map.put(row.getPrimaryKey(_dimensionTable.getPrimaryKeyColumns()), row);
           }
         }
-      } finally {
-        for (SegmentDataManager segmentManager : segmentManagers) {
-          releaseSegment(segmentManager);
-        }
       }
+      ZkHelixPropertyStore<ZNRecord> propertyStore = _helixManager.getHelixPropertyStore();
+      Schema tableSchema = ZKMetadataProvider.getTableSchema(propertyStore, _tableNameWithType);
+      List<String> primaryKeyColumns = tableSchema.getPrimaryKeyColumns();
+      return new DimensionTable(tableSchema, primaryKeyColumns, map);
     } finally {
-      _lookupTableWriteLock.unlock();
+      for (SegmentDataManager segmentManager : segmentManagers) {
+        releaseSegment(segmentManager);
+      }
     }
+  }
+
+  public boolean isPopulated() {
+    return !_dimensionTable.isEmpty();
   }
 
   public GenericRow lookupRowByPrimaryKey(PrimaryKey pk) {
-    _lookupTableReadLock.lock();
-    try {
-      return _lookupTable.get(pk);
-    } finally {
-      _lookupTableReadLock.unlock();
-    }
+    return _dimensionTable.get(pk);
   }
 
   public FieldSpec getColumnFieldSpec(String columnName) {
-    return _tableSchema.getFieldSpecFor(columnName);
+    return _dimensionTable.getFieldSpecFor(columnName);
   }
 
   public List<String> getPrimaryKeyColumns() {
-    return _primaryKeyColumns;
+    return _dimensionTable.getPrimaryKeyColumns();
   }
 }

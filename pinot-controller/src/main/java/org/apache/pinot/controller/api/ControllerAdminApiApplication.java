@@ -23,11 +23,13 @@ import java.io.IOException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.List;
+import javax.servlet.http.HttpServletResponse;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.container.ContainerResponseContext;
 import javax.ws.rs.container.ContainerResponseFilter;
 import org.apache.pinot.controller.ControllerConf;
 import org.apache.pinot.controller.api.access.AuthenticationFilter;
+import org.apache.pinot.core.api.ServiceAutoDiscoveryFeature;
 import org.apache.pinot.core.transport.ListenerConfig;
 import org.apache.pinot.core.util.ListenerConfigUtil;
 import org.apache.pinot.spi.utils.CommonConstants;
@@ -57,6 +59,9 @@ public class ControllerAdminApiApplication extends ResourceConfig {
     packages(_controllerResourcePackages);
     // TODO See ControllerResponseFilter
 //    register(new LoggingFeature());
+    if (conf.getProperty(CommonConstants.Controller.CONTROLLER_SERVICE_AUTO_DISCOVERY, false)) {
+      register(ServiceAutoDiscoveryFeature.class);
+    }
     register(JacksonFeature.class);
     register(MultiPartFeature.class);
     registerClasses(io.swagger.jaxrs.listing.ApiListingResource.class);
@@ -102,7 +107,7 @@ public class ControllerAdminApiApplication extends ResourceConfig {
     BeanConfig beanConfig = new BeanConfig();
     beanConfig.setTitle("Pinot Controller API");
     beanConfig.setDescription("APIs for accessing Pinot Controller information");
-    beanConfig.setContact("https://github.com/apache/incubator-pinot");
+    beanConfig.setContact("https://github.com/apache/pinot");
     beanConfig.setVersion("1.0");
     beanConfig.setSchemes(new String[]{CommonConstants.HTTP_PROTOCOL, CommonConstants.HTTPS_PROTOCOL});
     beanConfig.setBasePath("/");
@@ -115,7 +120,7 @@ public class ControllerAdminApiApplication extends ResourceConfig {
     httpServer.getServerConfiguration().addHttpHandler(apiStaticHttpHandler, "/api/");
     httpServer.getServerConfiguration().addHttpHandler(apiStaticHttpHandler, "/help/");
 
-    URL swaggerDistLocation = loader.getResource("META-INF/resources/webjars/swagger-ui/3.18.2/");
+    URL swaggerDistLocation = loader.getResource("META-INF/resources/webjars/swagger-ui/3.23.11/");
     CLStaticHttpHandler swaggerDist = new CLStaticHttpHandler(new URLClassLoader(new URL[]{swaggerDistLocation}));
     httpServer.getServerConfiguration().addHttpHandler(swaggerDist, "/swaggerui-dist/");
   }
@@ -133,6 +138,11 @@ public class ControllerAdminApiApplication extends ResourceConfig {
         ContainerResponseContext containerResponseContext)
         throws IOException {
       containerResponseContext.getHeaders().add("Access-Control-Allow-Origin", "*");
+      containerResponseContext.getHeaders().add("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS, DELETE");
+      containerResponseContext.getHeaders().add("Access-Control-Allow-Headers", "*");
+      if (containerRequestContext.getMethod().equals("OPTIONS")) {
+        containerResponseContext.setStatus(HttpServletResponse.SC_OK);
+      }
     }
   }
 }

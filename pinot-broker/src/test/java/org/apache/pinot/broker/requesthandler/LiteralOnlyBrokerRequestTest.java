@@ -23,7 +23,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Collections;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
-import org.apache.pinot.broker.api.RequestStatistics;
 import org.apache.pinot.broker.broker.AccessControlFactory;
 import org.apache.pinot.broker.broker.AllowAllAccessControlFactory;
 import org.apache.pinot.common.metrics.BrokerMetrics;
@@ -31,6 +30,8 @@ import org.apache.pinot.common.metrics.PinotMetricUtils;
 import org.apache.pinot.common.response.broker.BrokerResponseNative;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.spi.env.PinotConfiguration;
+import org.apache.pinot.spi.trace.RequestContext;
+import org.apache.pinot.spi.trace.Tracing;
 import org.apache.pinot.spi.utils.BytesUtils;
 import org.apache.pinot.sql.parsers.CalciteSqlParser;
 import org.testng.Assert;
@@ -94,6 +95,15 @@ public class LiteralOnlyBrokerRequestTest {
         .compileToPinotQuery("SELECT ago('PT1H'), fromDateTime('2020-01-01 UTC', 'yyyy-MM-dd z') FROM myTable")));
     Assert.assertFalse(BaseBrokerRequestHandler
         .isLiteralOnlyQuery(CalciteSqlParser.compileToPinotQuery("SELECT count(*) from foo where bar > ago('PT1H')")));
+    Assert.assertTrue(BaseBrokerRequestHandler.isLiteralOnlyQuery(CalciteSqlParser
+        .compileToPinotQuery("SELECT encodeUrl('key1=value 1&key2=value@!$2&key3=value%3'),"
+            + " decodeUrl('key1%3Dvalue+1%26key2%3Dvalue%40%21%242%26key3%3Dvalue%253') FROM myTable")));
+    Assert.assertFalse(BaseBrokerRequestHandler.isLiteralOnlyQuery(CalciteSqlParser
+            .compileToPinotQuery("SELECT count(*) from foo "
+                + "where bar = encodeUrl('key1=value 1&key2=value@!$2&key3=value%3')")));
+    Assert.assertFalse(BaseBrokerRequestHandler.isLiteralOnlyQuery(CalciteSqlParser
+        .compileToPinotQuery("SELECT count(*) from foo "
+            + "where bar = decodeUrl('key1%3Dvalue+1%26key2%3Dvalue%40%21%242%26key3%3Dvalue%253')")));
   }
 
   @Test
@@ -102,6 +112,9 @@ public class LiteralOnlyBrokerRequestTest {
         "SELECT now() AS currentTs, fromDateTime('2020-01-01 UTC', 'yyyy-MM-dd z') AS firstDayOf2020")));
     Assert.assertTrue(BaseBrokerRequestHandler.isLiteralOnlyQuery(CalciteSqlParser.compileToPinotQuery(
         "SELECT ago('PT1H') AS currentTs, fromDateTime('2020-01-01 UTC', 'yyyy-MM-dd z') AS firstDayOf2020")));
+    Assert.assertTrue(BaseBrokerRequestHandler.isLiteralOnlyQuery(CalciteSqlParser.compileToPinotQuery(
+        "SELECT encodeUrl('key1=value 1&key2=value@!$2&key3=value%3') AS encoded, "
+            + "decodeUrl('key1%3Dvalue+1%26key2%3Dvalue%40%21%242%26key3%3Dvalue%253') AS decoded")));
   }
 
   @Test
@@ -109,13 +122,14 @@ public class LiteralOnlyBrokerRequestTest {
       throws Exception {
     SingleConnectionBrokerRequestHandler requestHandler =
         new SingleConnectionBrokerRequestHandler(new PinotConfiguration(), null, ACCESS_CONTROL_FACTORY, null, null,
-            new BrokerMetrics("", PinotMetricUtils.getPinotMetricsRegistry(), true, Collections.emptySet()), null);
+            new BrokerMetrics("", PinotMetricUtils.getPinotMetricsRegistry(), true, Collections.emptySet()),
+            null, null);
     long randNum = RANDOM.nextLong();
     byte[] randBytes = new byte[12];
     RANDOM.nextBytes(randBytes);
     String ranStr = BytesUtils.toHexString(randBytes);
     JsonNode request = new ObjectMapper().readTree(String.format("{\"sql\":\"SELECT %d, '%s'\"}", randNum, ranStr));
-    RequestStatistics requestStats = new RequestStatistics();
+    RequestContext requestStats = Tracing.getTracer().createRequestScope();
     BrokerResponseNative brokerResponse = requestHandler.handleRequest(request, null, requestStats);
     Assert.assertEquals(brokerResponse.getResultTable().getDataSchema().getColumnName(0), String.format("%d", randNum));
     Assert.assertEquals(brokerResponse.getResultTable().getDataSchema().getColumnDataType(0),
@@ -135,11 +149,12 @@ public class LiteralOnlyBrokerRequestTest {
       throws Exception {
     SingleConnectionBrokerRequestHandler requestHandler =
         new SingleConnectionBrokerRequestHandler(new PinotConfiguration(), null, ACCESS_CONTROL_FACTORY, null, null,
-            new BrokerMetrics("", PinotMetricUtils.getPinotMetricsRegistry(), true, Collections.emptySet()), null);
+            new BrokerMetrics("", PinotMetricUtils.getPinotMetricsRegistry(), true, Collections.emptySet()),
+            null, null);
     long currentTsMin = System.currentTimeMillis();
     JsonNode request = new ObjectMapper().readTree(
         "{\"sql\":\"SELECT now() as currentTs, fromDateTime('2020-01-01 UTC', 'yyyy-MM-dd z') as firstDayOf2020\"}");
-    RequestStatistics requestStats = new RequestStatistics();
+    RequestContext requestStats = Tracing.getTracer().createRequestScope();
     BrokerResponseNative brokerResponse = requestHandler.handleRequest(request, null, requestStats);
     long currentTsMax = System.currentTimeMillis();
     Assert.assertEquals(brokerResponse.getResultTable().getDataSchema().getColumnName(0), "currentTs");
@@ -159,7 +174,7 @@ public class LiteralOnlyBrokerRequestTest {
     request = new ObjectMapper().readTree(
         "{\"sql\":\"SELECT ago('PT1H') as oneHourAgoTs, fromDateTime('2020-01-01 UTC', 'yyyy-MM-dd z') as "
             + "firstDayOf2020\"}");
-    requestStats = new RequestStatistics();
+    requestStats = Tracing.getTracer().createRequestScope();
     brokerResponse = requestHandler.handleRequest(request, null, requestStats);
     long oneHourAgoTsMax = System.currentTimeMillis() - ONE_HOUR_IN_MS;
     Assert.assertEquals(brokerResponse.getResultTable().getDataSchema().getColumnName(0), "oneHourAgoTs");
@@ -176,6 +191,26 @@ public class LiteralOnlyBrokerRequestTest {
         .assertTrue(Long.parseLong(brokerResponse.getResultTable().getRows().get(0)[0].toString()) <= oneHourAgoTsMax);
     Assert.assertEquals(brokerResponse.getResultTable().getRows().get(0)[1], 1577836800000L);
     Assert.assertEquals(brokerResponse.getTotalDocs(), 0);
+
+    request = new ObjectMapper().readTree(
+        "{\"sql\":\"SELECT encodeUrl('key1=value 1&key2=value@!$2&key3=value%3') AS encoded, "
+            + "decodeUrl('key1%3Dvalue+1%26key2%3Dvalue%40%21%242%26key3%3Dvalue%253') AS decoded\"}");
+    requestStats = Tracing.getTracer().createRequestScope();
+    brokerResponse = requestHandler.handleRequest(request, null, requestStats);
+    System.out.println(brokerResponse.getResultTable());
+    Assert.assertEquals(brokerResponse.getResultTable().getDataSchema().getColumnName(0), "encoded");
+    Assert.assertEquals(brokerResponse.getResultTable().getDataSchema().getColumnDataType(0),
+        DataSchema.ColumnDataType.STRING);
+    Assert.assertEquals(brokerResponse.getResultTable().getDataSchema().getColumnName(1), "decoded");
+    Assert.assertEquals(brokerResponse.getResultTable().getDataSchema().getColumnDataType(1),
+        DataSchema.ColumnDataType.STRING);
+    Assert.assertEquals(brokerResponse.getResultTable().getRows().size(), 1);
+    Assert.assertEquals(brokerResponse.getResultTable().getRows().get(0).length, 2);
+    Assert.assertEquals(brokerResponse.getResultTable().getRows().get(0)[0].toString(),
+        "key1%3Dvalue+1%26key2%3Dvalue%40%21%242%26key3%3Dvalue%253");
+    Assert.assertEquals(brokerResponse.getResultTable().getRows().get(0)[1].toString(),
+        "key1=value 1&key2=value@!$2&key3=value%3");
+    Assert.assertEquals(brokerResponse.getTotalDocs(), 0);
   }
 
   /** Tests for EXPLAIN PLAN for literal only queries. */
@@ -184,12 +219,13 @@ public class LiteralOnlyBrokerRequestTest {
       throws Exception {
     SingleConnectionBrokerRequestHandler requestHandler =
         new SingleConnectionBrokerRequestHandler(new PinotConfiguration(), null, ACCESS_CONTROL_FACTORY, null, null,
-            new BrokerMetrics("", PinotMetricUtils.getPinotMetricsRegistry(), true, Collections.emptySet()), null);
+            new BrokerMetrics("", PinotMetricUtils.getPinotMetricsRegistry(), true, Collections.emptySet()),
+            null, null);
 
     ObjectMapper objectMapper = new ObjectMapper();
     // Test 1: select constant
     JsonNode request = objectMapper.readTree("{\"sql\":\"EXPLAIN PLAN FOR SELECT 1.5, 'test'\"}");
-    RequestStatistics requestStats = new RequestStatistics();
+    RequestContext requestStats = Tracing.getTracer().createRequestScope();
     BrokerResponseNative brokerResponse = requestHandler.handleRequest(request, null, requestStats);
 
     checkExplainResultSchema(brokerResponse.getResultTable().getDataSchema(),
@@ -207,7 +243,7 @@ public class LiteralOnlyBrokerRequestTest {
     request = objectMapper.readTree(
         "{\"sql\":\"EXPLAIN PLAN FOR SELECT 6+8 as addition, fromDateTime('2020-01-01 UTC', 'yyyy-MM-dd z') as "
             + "firstDayOf2020\"}");
-    requestStats = new RequestStatistics();
+    requestStats = Tracing.getTracer().createRequestScope();
     brokerResponse = requestHandler.handleRequest(request, null, requestStats);
 
     checkExplainResultSchema(brokerResponse.getResultTable().getDataSchema(),
